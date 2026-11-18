@@ -1,0 +1,16 @@
+# Only application code and bundled reader assets enter the build context.
+**
+!/*.py
+!/requirements.txt
+!/static/
+!/static/**
+!/views/
+!/views/**
+**/__pycache__
+**/*.pyc
+**/*.sqlite3*
+**/*.secret
+**/*.registration.json*
+**/.env*
+**/*.pem
+**/*.key

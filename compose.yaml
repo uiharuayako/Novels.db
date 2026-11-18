@@ -1,0 +1,44 @@
+services:
+  webui:
+    image: ${RECOLL_WEBUI_IMAGE:-ghcr.io/uiharuayako/novels.db:latest}
+    user: "${RECOLL_WEBUI_UID:-1000}:${RECOLL_WEBUI_GID:-1000}"
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "${RECOLL_WEBUI_BIND:-127.0.0.1}:${RECOLL_WEBUI_PORT:-8080}:8080"
+    environment:
+      RECOLL_CONFDIR: /home/uiharu/.recoll-novel
+      RECOLL_WEBUI_DB_PATH: /var/lib/recoll-webui/app.sqlite3
+      RECOLL_TMPDIR: /tmp
+      RECOLL_WEBUI_TRUSTED_PROXIES: ${RECOLL_WEBUI_TRUSTED_PROXIES:-}
+      RECOLL_WEBUI_PROXY_SCHEME: ${RECOLL_WEBUI_PROXY_SCHEME:-}
+      RECOLL_WEBUI_COOKIE_SECURE: ${RECOLL_WEBUI_COOKIE_SECURE:-auto}
+    tmpfs:
+      - /tmp:mode=1777
+    volumes:
+      - type: bind
+        source: ${RECOLL_CONFIG_SOURCE:-/home/uiharu/.recoll-novel}
+        target: /home/uiharu/.recoll-novel
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${RECOLL_LIBRARY_SOURCE:-/mnt/share/migusuper/fastFolder/Novel}
+        target: /mnt/share/migusuper/fastFolder/Novel
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${RECOLL_INDEX_SOURCE:-/mnt/share/migusuper/fastFolder/re_index}
+        target: /mnt/share/migusuper/fastFolder/re_index
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${RECOLL_STATE_SOURCE:-/var/lib/recoll-webui}
+        target: /var/lib/recoll-webui
+        bind:
+          create_host_path: false

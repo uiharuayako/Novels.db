@@ -1,0 +1,66 @@
+name: Container image
+
+on:
+  pull_request:
+  push:
+    branches: ['**']
+    tags: ['*']
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) ||
+      startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=ref,event=pr
+            type=sha
+      - name: Build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          push: false
+          tags: novels-db:ci
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Check runtime
+        run: |
+          docker compose config --quiet
+          docker run --rm --entrypoint python novels-db:ci -c "import os; from recoll import recoll, rclextract, rclconfig; import webui; assert os.getuid() != 0"
+          docker run --rm --read-only --tmpfs /tmp:mode=1777 --user 65532:65532 --entrypoint python novels-db:ci -c "from pathlib import Path; import shutil, webui; Path('static/reader/kookit.bundle.js').open('rb').read(1); assert shutil.which('7z') and shutil.which('soffice')"
+          docker run --rm novels-db:ci python webui-standalone.py --help
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish
+        if: github.event_name == 'push'
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          while IFS= read -r image_tag; do
+            docker tag novels-db:ci "$image_tag"
+            docker push "$image_tag"
+          done <<< "$IMAGE_TAGS"
