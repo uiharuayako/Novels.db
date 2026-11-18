@@ -53,7 +53,8 @@ export function buildEpubOutline(toc, chapters) {
     for (const item of items || []) {
       const href = string(item.href), index = chapters.findIndex((chapter) => hrefPath(chapter.href) === hrefPath(href));
       if (index >= 0) result.push({ kind: 'epub', index, href, fragment: decode(href.split('#').slice(1).join('#')),
-        label: string(item.label || item.title || chapters[index].label || `第 ${index + 1} 章`), depth: Number(item.depth) || depth });
+        label: string(item.label || item.title || chapters[index].label || `第 ${index + 1} 章`), depth: Number(item.depth) || depth,
+        ...(!item.label && !item.title ? { generatedLabel: true } : {}) });
       visit(item.subitems || item.children || item.items, depth + 1);
     }
   };
@@ -130,6 +131,24 @@ export function scrollToTextMatch(doc, target, stage, frame) {
   return true;
 }
 
+// Count only resolvable, distinct targets. Volumes and prefaces are not chapters.
+export function outlineProgress(outline, activeOrdinal, complete = true) {
+  if (!complete || activeOrdinal < 0) return null;
+  const unique = [], seen = new Set();
+  for (let ordinal = 0; ordinal < outline.length; ordinal += 1) {
+    const item = outline[ordinal];
+    if (!Number.isFinite(Number(item.index))) continue;
+    const key = `${item.index}:${item.fragment || item.textOffset || ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key); unique.push({ ...item, ordinal });
+  }
+  const chapters = unique.some((item) => item.generatedLabel) ? [] : unique.filter((item) => /^(?:第[〇零一二三四五六七八九十百千万两\d]+[章节回]|chapter\s+[\divxlcdm]+)/i.test(item.label?.trim() || ''));
+  const sameLevel = chapters.length && chapters.every((item) => (item.depth || 0) === (chapters[0].depth || 0));
+  const entries = sameLevel ? chapters : unique.filter((item, index) => !unique[index + 1] || (unique[index + 1].depth || 0) <= (item.depth || 0));
+  const current = entries.findLastIndex((item) => item.ordinal <= activeOrdinal);
+  return current >= 0 && entries.length ? { index: current + 1, count: entries.length, unit: sameLevel ? '章' : '目录项' } : null;
+}
+
 export class ReaderNavigation {
   constructor({ getContext, onNavigate, onReturn, onKeep, onState, document: uiDocument = globalThis.document,
     fetchImpl = globalThis.fetch?.bind(globalThis), parseDocument } = {}) {
@@ -138,7 +157,7 @@ export class ReaderNavigation {
     this.onKeep = onKeep || (() => {}); this.onState = onState || (() => {});
     this.document = uiDocument; this.fetch = fetchImpl;
     this.parseDocument = parseDocument || ((text) => new DOMParser().parseFromString(text, 'text/html'));
-    this.outline = []; this.results = []; this.activeIndex = -1; this.activeOutlineIndex = -1; this.canReturn = false;
+    this.outlineComplete = false; this.outline = []; this.results = []; this.activeIndex = -1; this.activeOutlineIndex = -1; this.canReturn = false;
     this.generation = 0; this.searchGeneration = 0; this.outlineGeneration = 0; this.navigationGeneration = 0; this.textCache = new Map(); this.tab = 'toc';
     this.requests = new Set(); this.stopped = false; this.navigationPosition = null;
     this.attach();
@@ -206,6 +225,7 @@ export class ReaderNavigation {
     const token = ++this.generation;
     this.searchGeneration += 1; this.outlineGeneration += 1; this.textCache.clear(); this.results = []; this.outline = [];
     this.activeOutlineIndex = -1; this.canReturn = false; this.navigationPosition = null;
+    this.outlineComplete = false;
     this.renderResults(); this.status(''); this.emit();
     const context = this.context();
     try {
@@ -240,6 +260,7 @@ export class ReaderNavigation {
         }
       }
       if (token !== this.generation) return [];
+      this.outlineComplete = context.format !== 'txt' || Array.isArray(context.txt?.manifest?.toc);
       if (context.stage && this.boundStage !== context.stage) {
         if (this.boundStage && this.scrollListener) this.boundStage.removeEventListener('scroll', this.scrollListener);
         this.scrollListener = () => this.updateActiveHeading();
@@ -266,6 +287,7 @@ export class ReaderNavigation {
         }
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
+      this.outlineComplete = true;
       this.emit();
     } catch (error) {
       if (generation === this.generation && token === this.outlineGeneration) this.emit({ error: `章节识别未完成：${error.message}` });
@@ -469,6 +491,14 @@ export class ReaderNavigation {
       else selected = this.outline.findLastIndex((item) => item.index < index);
     }
     this.setActiveOutline(selected);
+  }
+  progressLocation() {
+    const context = this.context();
+    if (context.format === 'epub' && !(context.epub?.toc || context.rendition?.book?.toc)?.length) return null;
+    if (!['txt', 'epub'].includes(context.format)) return null;
+    // Chunk placeholders have no actual text target.
+    if (context.format === 'txt' && this.outline.some((item) => item.textOffset == null && !item.fragment)) return null;
+    return outlineProgress(this.outline, this.activeOutlineIndex, this.outlineComplete);
   }
   setActive(index) {
     this.activeIndex = Number(index);

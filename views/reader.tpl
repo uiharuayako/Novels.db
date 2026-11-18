@@ -1,9 +1,9 @@
 %include("header", title=" Reader", shared=get('shared', False))
-<link rel="stylesheet" href="{{app_url('/static/reader/reader-ui.css')}}?v=reader-ui-4">
+<link rel="stylesheet" href="{{app_url('/static/reader/reader-ui.css')}}?v=reader-ui-5">
 <div id="reader-app" class="reader-shell" data-mode="{{mode}}" data-query="{{query_string}}" data-theme="sepia">
   <header class="reader-toolbar" id="reader-toolbar" aria-label="阅读工具栏">
     <div class="reader-toolbar-left">
-      <a class="reader-button reader-icon-button" href="{{results_url}}" title="{{'分享内容' if get('shared', False) else '返回搜索结果'}}" aria-label="{{'分享内容' if get('shared', False) else '返回搜索结果'}}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6M8 12h12"/></svg></a>
+      <a class="reader-button reader-icon-button" href="{{results_url}}" title="{{'分享内容' if get('shared', False) else get('results_label', '返回搜索结果')}}" aria-label="{{'分享内容' if get('shared', False) else get('results_label', '返回搜索结果')}}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6M8 12h12"/></svg></a>
       <span class="reader-toolbar-divider" aria-hidden="true"></span>
       <button class="reader-button reader-icon-button" id="reader-toggle-toc" type="button" title="目录、书单与搜索（T）" aria-label="打开或收起阅读导航" aria-controls="reader-sidebar" aria-expanded="true" aria-keyshortcuts="T"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16m4-11h4m-4 4h4"/></svg></button>
     </div>
@@ -131,5 +131,5 @@
 <script>
 window.RECOLL_READER = {{!reader_config_json}};
 </script>
-<script type="module" src="{{app_url('/static/reader/app.js')}}?v=reader-ui-5"></script>
+<script type="module" src="{{app_url('/static/reader/app.js')}}?v=reader-ui-8"></script>
 %include("footer")

@@ -43,7 +43,8 @@ def test_txt_reading_controls_full_search_and_temporary_progress(mobile):
     calls, fetched, errors = [], [], []
     prefix = '/library'
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True, executable_path=chromium, args=['--no-sandbox'])
+        browser = playwright.chromium.launch(headless=True, executable_path=chromium, args=['--no-sandbox'],
+                                             ignore_default_args=['--hide-scrollbars'])
         context = browser.new_context(viewport={'width': 390, 'height': 844} if mobile else {'width': 1280, 'height': 900},
                                       is_mobile=mobile, has_touch=mobile)
 
@@ -134,6 +135,10 @@ def test_txt_reading_controls_full_search_and_temporary_progress(mobile):
         page.locator('#reader-indent').check()
         page.wait_for_function("() => {const f=document.querySelector('[data-chunk-index=\"1\"] iframe'),p=f?.contentDocument.querySelector('p[data-reader-txt-line]');if(!p)return false;const s=f.contentWindow.getComputedStyle(p);return s.marginBottom==='20px'&&s.textAlign==='justify'&&s.textIndent==='44px'}")
         page.locator('#reader-close-settings').click()
+        if not mobile:
+            # A tall paragraph margin must not create a scrollbar inside a TXT chunk.
+            frame = page.locator('[data-chunk-index="1"] iframe')
+            assert frame.evaluate('node => node.contentDocument.documentElement.clientWidth === node.clientWidth')
 
         page.locator('#reader-toggle-toc').click()
         page.locator('#reader-tab-search').click()
@@ -189,7 +194,8 @@ def test_txt_reading_controls_full_search_and_temporary_progress(mobile):
 
 
 @pytest.mark.parametrize('mobile', [False, True])
-def test_epub_unmounted_search_return_and_progress_navigation(mobile):
+@pytest.mark.parametrize('has_toc', [True, False])
+def test_epub_unmounted_search_return_and_progress_navigation(mobile, has_toc):
     chromium = os.environ.get('RECOLL_TEST_CHROMIUM') or shutil.which('chromium') or shutil.which('google-chrome')
     if not chromium:
         pytest.skip('Set RECOLL_TEST_CHROMIUM to run browser checks')
@@ -238,7 +244,7 @@ def test_epub_unmounted_search_return_and_progress_navigation(mobile):
             if path == '/api/reader/progress/epub-doc':
                 return send({**saved, 'settings': settings})
             if path == '/epub/manifest':
-                return send({'chapters': chapters, 'toc': [{'label': chapter['label'], 'href': chapter['href']} for chapter in chapters]})
+                return send({'chapters': chapters, 'toc': [{'label': chapter['label'], 'href': chapter['href']} for chapter in chapters] if has_toc else []})
             if path.startswith('/epub/content/'):
                 index = int(path.rsplit('/', 1)[1]); fetched.append(index)
                 paragraphs = ''.join(f'<p>Chunk {index:02d} paragraph {line:03d} ordinary reading content.</p>' for line in range(100))
@@ -298,6 +304,9 @@ def test_epub_unmounted_search_return_and_progress_navigation(mobile):
         page.wait_for_function('() => window.rendition.getPosition().chapterDocIndex === 7')
         page.wait_for_timeout(250)
         assert page.locator('[data-chapter-index="7"] iframe').count() == 1
+        label = page.locator('#reader-progress-label').inner_text()
+        assert ('第 8/8 章' if has_toc else '第 8/8 区段') in label
+        assert page.locator('#reader-progress-range').get_attribute('aria-valuetext') == label
         height = page.locator('[data-chapter-index="7"] iframe').evaluate('frame=>frame.offsetHeight')
         page.wait_for_timeout(250)
         assert abs(page.locator('[data-chapter-index="7"] iframe').evaluate('frame=>frame.offsetHeight') - height) <= 1
@@ -309,5 +318,9 @@ def test_epub_unmounted_search_return_and_progress_navigation(mobile):
         page.evaluate("window.dispatchEvent(new Event('beforeunload'))")
         page.wait_for_timeout(150)
         assert saved['position']['chapterDocIndex'] == 7
+        assert not page.locator('#reader-book-end').is_visible()
+        page.evaluate('async () => {await window.rendition.goToPosition({chapterDocIndex:7,chapterProgressRatio:1,intraChapterOffset:-1})}')
+        page.wait_for_function("() => document.querySelector('#reader-book-end')?.hidden === false")
+        assert not page.locator('#reader-book-end-next').is_visible()
         assert not errors, errors
         context.close(); browser.close()

@@ -14,7 +14,7 @@
 %for dr, prefix in config['mounts'].items():
     %url = url.replace(dr, prefix)
 %end
-%stable_reader = d.get('document_id') and not d.get('ipath')
+%stable_reader = d.get('document_id') and d.get('reader_resumable', not d.get('ipath'))
 %read_url = app_url('/reader') + '?mode=book&' + (urlencode({'document_id': d['document_id']}) + '&' + reader_return_query if stable_reader else 'resnum=' + str(number-1) + '&' + query_string)
 %preview_url = app_url('/preview/' + str(number-1)) + '?' + query_string
 %download_url = app_url('/download/' + str(number-1)) + '?' + query_string

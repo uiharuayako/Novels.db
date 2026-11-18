@@ -211,7 +211,7 @@ export class PdfRendition {
     const page = this.viewer.getPageView(low);
     const ratio = clamp((top - this.pageTop(page)) / Math.max(1, page.div.clientHeight), 0, 1);
     const atEnd = low === this.pdf.numPages - 1
-      && top + this.stage.clientHeight >= this.stage.scrollHeight - 2;
+      && top + this.stage.clientHeight >= this.pageTop(page) + page.div.clientHeight - 2;
     return {
       version: 1, pageNumber: low + 1, pageOffsetRatio: ratio,
       percentage: String(atEnd ? 1 : (low + ratio) / this.pdf.numPages),

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const source = await readFile(new URL('../static/reader/navigation.js', import.meta.url), 'utf8');
-const { ReaderNavigation, findTextMatches, buildEpubOutline, extractTxtOutline, buildTextIndex } =
+const { ReaderNavigation, findTextMatches, buildEpubOutline, extractTxtOutline, buildTextIndex, outlineProgress } =
   await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
 const textNode = (nodeValue) => ({ nodeType: 3, nodeValue });
@@ -33,6 +33,7 @@ test('EPUB TOC preserves nested fragment targets and skips unresolvable links', 
     { label: 'Missing', href: 'missing.xhtml' }], chapters);
   assert.deepEqual(outline, [{ kind: 'epub', index: 1, href: 'Text/b.xhtml#%E7%AB%A0', fragment: '章', label: 'Heading', depth: 1 }]);
   assert.equal(buildEpubOutline([], chapters).length, 2);
+  assert.deepEqual(outlineProgress(buildEpubOutline([{ href: 'Text/a.xhtml' }], [{ href: 'Text/a.xhtml', label: 'Chapter 1' }]), 0), { index: 1, count: 1, unit: '目录项' });
 });
 
 test('TXT chapter detection supports Chinese/English and rejects heading words in prose', () => {
@@ -261,4 +262,23 @@ test('PDF adjacent navigation visits multiple directory destinations on the same
   assert.deepEqual(calls, ['Section 1', 'Section 2', 'Section 3', 'Section 2']);
   context.position.pageNumber = 2; navigation.updateActiveHeading();
   assert.equal(navigation.activeOutlineIndex, 2);
+});
+
+
+test('numeric chapter progress ignores prefaces, volume groups, and duplicate targets', () => {
+  const outline = [
+    { index: 0, label: '前言', textOffset: 0, depth: 0 },
+    { index: 0, label: '第一卷', textOffset: 20, depth: 0 },
+    { index: 0, label: '第一章 山', textOffset: 30, depth: 1 },
+    { index: 0, label: '第一章 山（重复）', textOffset: 30, depth: 1 },
+    { index: 0, label: '第二章 海', textOffset: 90, depth: 1 },
+  ];
+  assert.equal(outlineProgress(outline, 0), null);
+  assert.equal(outlineProgress(outline, 1), null);
+  assert.equal(outlineProgress(outline, 4, false), null);
+  assert.deepEqual(outlineProgress(outline, 2), { index: 1, count: 2, unit: '章' });
+  assert.deepEqual(outlineProgress(outline, 4), { index: 2, count: 2, unit: '章' });
+  const ambiguous = [{ index: 0, fragment: 'a', label: 'Start', depth: 0 }, { index: 0, fragment: 'b', label: 'Details', depth: 1 },
+    { index: 1, fragment: 'c', label: 'Finish', depth: 0 }];
+  assert.deepEqual(outlineProgress(ambiguous, 1), { index: 1, count: 2, unit: '目录项' });
 });

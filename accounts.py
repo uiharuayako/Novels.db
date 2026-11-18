@@ -128,9 +128,9 @@ def _json(value, maximum=16384):
     return result
 
 
-def _password(value):
-    if not isinstance(value, str) or not 15 <= len(value) <= 128:
-        raise ValidationError("Password must contain 15–128 characters")
+def _password(value, *, minimum=15):
+    if not isinstance(value, str) or not minimum <= len(value) <= 128:
+        raise ValidationError(f"Password must contain {minimum}–128 characters")
     return value
 
 
@@ -425,7 +425,7 @@ class Store:
     def register_user(self, username, password, activation_code="", address=""):
         self._registration_attempt(address)
         username = _username(username)
-        password = _password(password)
+        password = _password(password, minimum=10)
         if not isinstance(activation_code, str) or len(activation_code) > 128:
             raise ValidationError("Activation code must contain at most 128 characters")
         verified_hash = self._verify_registration_code(self._registration_config(), activation_code)
@@ -744,6 +744,19 @@ class Store:
             # Pending requests belonging to any previous generation cannot complete.
 
     def register_document(self, library_key, source_url, source_path, ipath="", rcludi="", title="", format="", content_version=""):
+        with self._connection(write=True) as connection:
+            return self._register_document(connection, library_key, source_url, source_path,
+                                           ipath, rcludi, title, format, content_version)
+
+    def register_documents(self, documents):
+        """Register a result page with one commit, preserving input order."""
+        if not documents:
+            return []
+        with self._connection(write=True) as connection:
+            return [self._register_document(connection, **document) for document in documents]
+
+    @staticmethod
+    def _register_document(connection, library_key, source_url, source_path, ipath="", rcludi="", title="", format="", content_version=""):
         if not all(isinstance(value, str) for value in (library_key, source_url, source_path, ipath, rcludi, title, format, content_version)) or not library_key or not (source_url or source_path):
             raise ValidationError("Invalid document locator")
         if source_path:
@@ -752,18 +765,17 @@ class Store:
         else:
             identity = [source_url, ipath]
         locator_key = hashlib.sha256(_json(identity).encode()).hexdigest()
-        with self._connection(write=True) as connection:
-            row = connection.execute("SELECT * FROM document_refs WHERE library_key=? AND locator_key=?", (library_key, locator_key)).fetchone()
-            if row:
-                actual = [row["source_path"], row["ipath"]] if row["source_path"] else [row["source_url"], row["ipath"]]
-                if actual != identity:
-                    raise ConflictError("Document locator digest collision")
-                identifier = row["id"]
-                connection.execute("UPDATE document_refs SET source_url=?,rcludi=?,title=?,format=?,content_version=?,last_verified_at=? WHERE id=?", (source_url, rcludi, title, format.lower(), content_version, time.time(), identifier))
-            else:
-                identifier = _id()
-                connection.execute("INSERT INTO document_refs VALUES(?,?,?,?,?,?,?,?,?,?,?)", (identifier, library_key, locator_key, source_url, source_path, ipath, rcludi, title, format.lower(), content_version, time.time()))
-            return dict(connection.execute("SELECT * FROM document_refs WHERE id=?", (identifier,)).fetchone())
+        row = connection.execute("SELECT * FROM document_refs WHERE library_key=? AND locator_key=?", (library_key, locator_key)).fetchone()
+        if row:
+            actual = [row["source_path"], row["ipath"]] if row["source_path"] else [row["source_url"], row["ipath"]]
+            if actual != identity:
+                raise ConflictError("Document locator digest collision")
+            identifier = row["id"]
+            connection.execute("UPDATE document_refs SET source_url=?,rcludi=?,title=?,format=?,content_version=?,last_verified_at=? WHERE id=?", (source_url, rcludi, title, format.lower(), content_version, time.time(), identifier))
+        else:
+            identifier = _id()
+            connection.execute("INSERT INTO document_refs VALUES(?,?,?,?,?,?,?,?,?,?,?)", (identifier, library_key, locator_key, source_url, source_path, ipath, rcludi, title, format.lower(), content_version, time.time()))
+        return dict(connection.execute("SELECT * FROM document_refs WHERE id=?", (identifier,)).fetchone())
 
     def get_document(self, document_id):
         with self._connection() as connection:

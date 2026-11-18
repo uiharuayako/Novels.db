@@ -4,6 +4,8 @@ These tests require the system Recoll Python bindings and ``recollindex``. They
 never connect to an existing Recoll configuration or a running web service.
 """
 import importlib.util
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import csv
 import io
 import json
@@ -12,6 +14,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 import uuid
@@ -49,8 +52,29 @@ def recoll_index(tmp_path_factory):
     return SimpleNamespace(root=root, books=books, index=index)
 
 
-@pytest.fixture
-def site(tmp_path, monkeypatch, recoll_index):
+@pytest.fixture(scope='module')
+def continuity_index(tmp_path_factory):
+    pytest.importorskip('recoll.recoll', reason='system Recoll Python bindings are required')
+    if not shutil.which('recollindex'):
+        pytest.skip('recollindex is required for the real-index integration tests')
+    import zipfile
+    root = tmp_path_factory.mktemp('recoll-continuity-index')
+    books, config, index = root / 'books', root / 'conf', root / 'index'
+    books.mkdir()
+    config.mkdir()
+    (books / 'paged.txt').write_text(''.join(f'pagedcontinuitytoken line {number:04d} ' + 'ordinary text ' * 10 + '\n' for number in range(90)), encoding='utf-8')
+    with zipfile.ZipFile(books / 'indexed-members.zip', 'w') as archive:
+        archive.writestr('one.txt', 'memberoneuniquetoken <literal> only member one')
+        archive.writestr('two.txt', 'membertwouniquetoken only member two')
+    (config / 'recoll.conf').write_text(
+        f'topdirs = {books}\ndbdir = {index}\nindexstemminglanguages = english\n'
+        f'loglevel = 1\nlogfilename = {root / "index.log"}\ntextfilepagekbs = 1\n', encoding='utf-8')
+    result = subprocess.run(['recollindex', '-c', str(config), '-z'], capture_output=True, text=True, timeout=45)
+    assert result.returncode == 0, result.stderr[-4000:] or result.stdout[-4000:]
+    return SimpleNamespace(root=root, books=books, index=index)
+
+
+def _site(tmp_path, monkeypatch, recoll_index):
     config = tmp_path / 'recoll-config'
     config.mkdir()
     base_config = (
@@ -90,6 +114,16 @@ def site(tmp_path, monkeypatch, recoll_index):
     finally:
         sys.modules.pop(name, None)
         bottle.TEMPLATE_PATH[:] = template_paths
+
+
+@pytest.fixture
+def site(tmp_path, monkeypatch, recoll_index):
+    yield from _site(tmp_path, monkeypatch, recoll_index)
+
+
+@pytest.fixture
+def continuity_site(tmp_path, monkeypatch, continuity_index):
+    yield from _site(tmp_path, monkeypatch, continuity_index)
 
 
 def client_for(site, username='alice', prefix=''):
@@ -196,6 +230,44 @@ def test_legacy_get_zero_results_execution_failure_and_disabled_history(site):
     client.get(target)
     with sqlite3.connect(site.store.path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM search_history WHERE status='pending'").fetchone()[0] == 0
+    assert len(history_rows(site)) == 1
+
+
+def test_search_timeout_stops_worker_keeps_server_responsive_and_records_failure(site, monkeypatch):
+    client = client_for(site)
+    target = search_for(client)
+    event_id = parse_qs(urlsplit(target).query)['search_id'][0]
+    (site.config / 'recoll.conf').write_text(
+        site.base_config + 'webui_search_timeout = 2\n', encoding='utf-8')
+    run, popen = subprocess.run, subprocess.Popen
+    started, children = threading.Event(), []
+
+    def capture_child(*args, **kwargs):
+        child = popen(*args, **kwargs)
+        children.append(child)
+        started.set()
+        return child
+
+    def stalled_worker(command, **kwargs):
+        assert Path(command[-1]).name == 'search_worker.py'
+        assert kwargs['timeout'] == 2
+        return run([sys.executable, '-c', 'import time; time.sleep(60)'], **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(site.module.subprocess, 'run', stalled_worker)
+        patched.setattr(site.module.subprocess, 'Popen', capture_child)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            waiting = executor.submit(client.get, target, status=504)
+            assert started.wait(3)
+            TestApp(site.app).get('/login', status=200)
+            assert children[0].poll() is None  # Other requests finish while search is running.
+            response = waiting.result(timeout=5)
+
+    assert '搜索超时' in response.text and '2 秒' in response.text
+    assert len(children) == 1 and children[0].returncode < 0
+    assert site.store.get_search(site.alice['id'], event_id)['status'] == 'failed'
+    assert history_rows(site) == []
+    assert found(client.get(search_for(client))) == 3
     assert len(history_rows(site)) == 1
 
 
@@ -409,6 +481,36 @@ def test_reader_bytes_range_and_html_are_sandboxed_and_bound_to_each_session(sit
     login.get('/staticdoc/' + str(site.store.path).lstrip('/'), status=404)
 
 
+def test_legacy_word_results_preview_embeds_document_images(tmp_path, monkeypatch):
+    pytest.importorskip('recoll.recoll')
+    if not shutil.which('soffice') or not shutil.which('recollindex'):
+        pytest.skip('LibreOffice Writer and Recoll are required')
+    books, confdir, index = tmp_path / 'books', tmp_path / 'index-conf', tmp_path / 'index'
+    books.mkdir()
+    confdir.mkdir()
+    source = tmp_path / 'word-preview.html'
+    png = ('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8A'
+           'AwMCAO+aemgAAAAASUVORK5CYII=')
+    source.write_text(f'<html><body><h1>wordpreviewtoken</h1><img src="data:image/png;base64,{png}">'
+                      '</body></html>', encoding='utf-8')
+    profile = (tmp_path / 'lo-profile').as_uri()
+    subprocess.run(['soffice', '--headless', f'-env:UserInstallation={profile}', '--convert-to',
+                    'doc:MS Word 97', '--outdir', str(books), str(source)],
+                   check=True, capture_output=True, timeout=30)
+    assert (books / 'word-preview.doc').is_file()
+    (confdir / 'recoll.conf').write_text(f'topdirs = {books}\ndbdir = {index}\nloglevel = 1\n')
+    subprocess.run(['recollindex', '-c', str(confdir), '-z'], check=True, capture_output=True, timeout=45)
+
+    with contextmanager(_site)(tmp_path, monkeypatch, SimpleNamespace(books=books, index=index)) as word_site:
+        client = client_for(word_site)
+        result = client.get('/results', {'query': 'wordpreviewtoken'})
+        preview_url = result.html.select_one('.search-result .app-result-primary')['href']
+        preview = client.get(preview_url)
+        assert preview.html.select_one('img')['src'].startswith('data:image/')
+        assert preview.html.select_one('.search-result-highlight').get_text() == 'wordpreviewtoken'
+        assert "script-src 'none'" in preview.headers['Content-Security-Policy']
+
+
 def test_only_explicit_open_creates_reading_then_cas_and_clear_prevent_late_writes(site):
     client = client_for(site)
     book = book_for(client)
@@ -584,6 +686,28 @@ def test_result_limit_bounds_rendering_and_pagination(site):
     assert len(client.get(target).html.select('.search-result')) == 1
     assert len(client.get(changed_query(target, page=2)).html.select('.search-result')) == 1
     assert len(client.get(changed_query(target, page=3)).html.select('.search-result')) == 0
+
+
+def test_search_batch_keeps_valid_books_when_one_indexed_source_is_missing(site):
+    client = client_for(site)
+    site.store.save_settings(site.alice['id'], preferences={'perpage': 0})
+    before = client.get(search_for(client))
+    original_ids = {button['data-document-id'] for button in before.html.select('.shelf-toggle')}
+    assert len(original_ids) == 3
+    source = site.books / 'beta.txt'
+    held = site.root / 'temporarily-unavailable.txt'
+    source.rename(held)
+    try:
+        result = client.get(search_for(client))
+        assert found(result) == 3
+        assert len(result.html.select('.search-result')) == 3
+        available_ids = {button['data-document-id'] for button in result.html.select('.shelf-toggle')}
+        assert len(available_ids) == 2 and available_ids < original_ids
+        assert '部分书架操作暂不可用' in result.text
+    finally:
+        held.rename(source)
+    restored = client.get(search_for(client))
+    assert {button['data-document-id'] for button in restored.html.select('.shelf-toggle')} == original_ids
 
 
 def test_complete_settings_form_saves_types_and_device_mapping_without_cross_account_leaks(site):
@@ -816,3 +940,97 @@ def test_utf8_settings_and_account_display_names_are_preserved(site):
                                              'password': '中文密码足够长足够长用于集成验证', 'role': 'member'}, status=302)
     created = next(user for user in site.store.list_users() if user['username'] == 'reader-cn')
     assert created['display_name'] == '中文读者'
+
+
+def test_native_txt_search_pages_share_whole_book_progress_and_resolve_old_ids(continuity_site):
+    site = continuity_site
+    from recoll import recoll
+    client = client_for(site)
+    db = recoll.connect(confdir=str(site.config))
+    query = db.query()
+    query.execute('pagedcontinuitytoken')
+    pages = list(query)
+    assert len(pages) >= 2
+    assert any(str(doc.ipath).isdigit() for doc in pages)
+    refs = [site.module.appdata.register_doc(doc) for doc in pages]
+    assert len({ref['id'] for ref in refs}) == 1
+    assert refs[0]['ipath'] == ''
+    results = client.get('/results', {'query': 'pagedcontinuitytoken'})
+    folder_link = next(link for link in results.html.select('.search-result-links a') if link.get_text() == '阅读当前文件夹')
+    folder_params = parse_qs(urlsplit(folder_link['href']).query)
+    assert folder_params['document_id'] == [refs[0]['id']]
+    assert folder_params['mode'] == ['folder']
+    solo = next(link for link in results.html.select('.search-result-links a') if link.get_text() == '单独阅读此文件')
+    assert parse_qs(urlsplit(solo['href']).query)['document_id'] == [refs[0]['id']]
+    folder = client.get('/api/reader/folder', {'document_id': refs[0]['id']}).json
+    current = folder['items'][folder['currentIndex']]
+    assert current['documentId'] == refs[0]['id']
+    book = book_for(client, 'pagedcontinuitytoken')
+    assert book['documentId'] == refs[0]['id']
+    assert book['progressSupported'] is True
+    payload = site.module.read_reader_token(book['token'])
+    assert payload['document_id'] == book['documentId']
+    post_json(client, '/api/reader/open', {'handle': book['openHandle']})
+    position = progress_body(client, book)
+    position['position'] = {'chunkIndex': 0, 'chunkProgressRatio': .58}
+    post_json(client, '/api/reader/progress/' + book['documentId'], position)
+    source = next(doc for doc in pages if str(doc.ipath).isdigit())
+    old = site.store.register_document(
+        refs[0]['library_key'], refs[0]['source_url'], refs[0]['source_path'],
+        ipath=source.ipath, format='txt', title='Old search page', content_version=book['contentVersion'])
+    assert old['id'] != book['documentId']
+    old_position = {'chunkIndex': 0, 'chunkProgressRatio': .1}
+    settings = identity(client)['settings']
+    site.store.open_reading(site.alice['id'], old['id'], settings['reading_epoch'], settings['progress_epoch'])
+    site.store.save_progress(site.alice['id'], old['id'], old_position, 0, 'old-tab', 1,
+                             identity(client)['settings']['progress_epoch'], book['contentVersion'])
+    reopened = client.get('/api/reader/book', {'document_id': old['id']}).json['book']
+    assert reopened['documentId'] == book['documentId']
+    assert client.get('/api/reader/progress/' + old['id']).json['position'] == position['position']
+    assert site.store.get_progress(site.alice['id'], old['id'])['position'] == old_position
+    assert client.get('/api/reader/progress/' + book['documentId']).json['position'] == position['position']
+
+
+def test_numeric_container_members_never_alias_a_parent_or_each_other(continuity_site):
+    site = continuity_site
+    client = client_for(site)
+    # Numeric ipaths in a container are member IDs, not textfilepagekbs offsets.
+    archive = site.books / 'members.zip'
+    import zipfile
+    with zipfile.ZipFile(archive, 'w') as output:
+        output.writestr('one.txt', 'one')
+        output.writestr('two.txt', 'two')
+    try:
+        refs = [site.module.appdata.register_doc(SimpleNamespace(
+            url=archive.as_uri(), filename=f'{name}.txt', mtype='text/plain', ipath=str(index)))
+                for index, name in [(1, 'one'), (2, 'two')]]
+        parent = site.module.appdata.register_path(str(archive), format='zip')
+        assert len({ref['id'] for ref in refs} | {parent['id']}) == 3
+        for ref in refs:
+            client.get('/api/reader/progress/' + ref['id'], status=400)
+            assert site.store.get_document(ref['id'])['ipath'] == ref['ipath']
+            assert site.store.get_progress(site.alice['id'], ref['id']) is None
+        assert site.store.get_document(parent['id'])['ipath'] == ''
+    finally:
+        archive.unlink()
+
+
+def test_real_container_members_use_correct_read_only_extracted_preview(continuity_site):
+    site = continuity_site
+    client = client_for(site)
+    first = book_for(client, 'memberoneuniquetoken')
+    second = book_for(client, 'membertwouniquetoken')
+    assert first['documentId'] != second['documentId']
+    for book, own, other in [(first, 'memberoneuniquetoken', 'membertwouniquetoken'),
+                             (second, 'membertwouniquetoken', 'memberoneuniquetoken')]:
+        assert book['progressSupported'] is False
+        assert book['readOnlyPreview'] is True
+        assert book['format'] == 'html'
+        assert '/preview/' in book['url']
+        assert 'token' not in book
+        text = client.get(book['url']).text
+        assert own in text
+        assert other not in text
+        assert not text.startswith('PK')
+        assert site.store.get_progress(site.alice['id'], book['documentId']) is None
+    assert '<literal>' in client.get(first['url']).text

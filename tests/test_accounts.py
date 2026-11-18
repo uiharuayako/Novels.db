@@ -221,6 +221,25 @@ def test_document_identity_is_independent_of_title_and_query_url(store, document
     assert library["id"] != document["id"]
 
 
+def test_document_batch_reuses_ids_updates_metadata_and_rolls_back_invalid_input(store, document):
+    locators = [
+        dict(library_key="library", source_url="file:///books/one.txt#search=term",
+             source_path="/books/../books/one.txt", title="Updated title", format="TXT", content_version="v2"),
+        dict(library_key="library", source_url="file:///books/two.txt", source_path="/books/two.txt", title="Book two"),
+        dict(library_key="library", source_url="file:///books/one.txt", source_path="/books/one.txt", ipath="child"),
+    ]
+    registered = store.register_documents(locators)
+    assert registered[0]["id"] == document["id"]
+    assert len({ref["id"] for ref in registered}) == 3
+    assert registered[0]["format"] == "txt"
+    assert store.get_document(document["id"])["content_version"] == "v2"
+    assert [ref["id"] for ref in store.register_documents(locators)] == [ref["id"] for ref in registered]
+    assert store.register_document(**locators[1])["id"] == registered[1]["id"]
+    with pytest.raises(ValidationError):
+        store.register_documents([dict(locators[0], title="Must roll back"), dict(locators[1], library_key="")])
+    assert store.get_document(document["id"])["title"] == "Updated title"
+
+
 def test_reading_and_progress_flags_are_independent(store, users, document):
     uid = users[0]["id"]
     settings = store.save_settings(uid, flags={"reading_history_enabled": False})

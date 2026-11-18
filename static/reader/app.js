@@ -1,9 +1,10 @@
-import { ReaderAccountSync, sectionReadingProgress } from './account-sync.js';
+import { ReaderAccountSync, sectionReadingProgress } from './account-sync.js?v=reader-continuity-1';
 import { ReaderSettings } from './settings.js';
 import { captureTextAnchor, restoreTextAnchor } from './anchors.js';
-import { ReaderNavigation, scrollToTextMatch } from './navigation.js';
+import { ReaderNavigation, scrollToTextMatch } from './navigation.js?v=reader-continuity-1';
 import { ReaderExperience } from './experience.js';
 import { ChmSandboxReader } from './chm-adapter.js';
+import { ReaderBookEnd } from './continuity.js';
 
 const query = new URLSearchParams(window.location.search);
 document.documentElement.classList.add('reader-page-root');
@@ -23,7 +24,8 @@ const DEFAULT_FONT_SIZE = 20;
 const MIN_FONT_SIZE = 16;
 const MAX_FONT_SIZE = 32;
 const FONT_SIZE_STEP = 2;
-const SCROLL_READER_FORMATS = new Set(['txt', 'md', 'html', 'htm', 'xhtml', 'xml', 'mhtml', 'epub', 'pdf']);
+const HTML_READER_FORMATS = new Set(['html', 'htm', 'xhtml', 'docx']);
+const SCROLL_READER_FORMATS = new Set([...HTML_READER_FORMATS, 'txt', 'md', 'xml', 'mhtml', 'epub', 'pdf']);
 const TXT_MOUNT_WINDOW_BEFORE = 2;
 const TXT_MOUNT_WINDOW_AFTER = 2;
 const TXT_PRELOAD_WINDOW_BEFORE = 4;
@@ -121,11 +123,13 @@ const state = {
 let readerSettings;
 let readerNavigation;
 let readerExperience;
+let bookEnd;
 
 window.Kookit = window.Kookit || {};
+const importKookit = () => import('./kookit.bundle.js?v=word-reader-1');
 const ensureKookitRuntime = async () => {
   if (!window.BookHelper) {
-    const mod = await import('./kookit.bundle.js');
+    const mod = await importKookit();
     const exported = mod?.default || mod;
     window.Kookit = Object.keys(window.Kookit).length ? window.Kookit : exported;
     window.BookHelper = exported?.BookHelper;
@@ -176,7 +180,24 @@ const continueHereButton = document.createElement('button');
 continueHereButton.type = 'button';
 continueHereButton.className = 'reader-button';
 continueHereButton.textContent = '从当前继续';
-syncStatus.append(adoptSavedButton, continueHereButton);
+const dismissSyncButton = document.createElement('button');
+dismissSyncButton.type = 'button';
+dismissSyncButton.className = 'reader-button';
+dismissSyncButton.textContent = '收起';
+dismissSyncButton.hidden = true;
+const dismissedSources = new Set();
+// Keep the compact capability in the metadata row, outside popup/status clipping.
+const compactSyncStatus = document.createElement('span');
+compactSyncStatus.className = 'reader-sync-capability';
+compactSyncStatus.textContent = '进度保存不可用';
+compactSyncStatus.setAttribute('aria-hidden', 'true');
+dismissSyncButton.addEventListener('click', () => {
+  dismissedSources.add(state.current?.documentId);
+  syncMessage.textContent = '进度保存不可用';
+  metaEl?.append(compactSyncStatus);
+  dismissSyncButton.hidden = true;
+});
+syncStatus.append(adoptSavedButton, continueHereButton, dismissSyncButton);
 adoptSavedButton.hidden = continueHereButton.hidden = true;
 if (metaEl && metaEl.parentNode) metaEl.parentNode.appendChild(syncStatus);
 const showReaderError = (message) => {
@@ -235,7 +256,7 @@ const clearAccountReader = (message = '登录状态已改变，请重新登录�
   titleEl.textContent = '阅读已暂停';
   metaEl.textContent = '';
   syncMessage.textContent = message;
-  adoptSavedButton.hidden = continueHereButton.hidden = true;
+  adoptSavedButton.hidden = continueHereButton.hidden = dismissSyncButton.hidden = true;
   shelfButton.disabled = true;
   shareButton.hidden = true;
   shareButton.removeAttribute('href');
@@ -247,7 +268,11 @@ const accountSync = new ReaderAccountSync({ account, apiBase: baseApi,
   onExpired: () => clearAccountReader(),
   onStatus: ({ type, message }) => {
     syncStatus.dataset.status = type;
-    syncMessage.textContent = message;
+    const dismissed = type === 'unsupported' && dismissedSources.has(state.current?.documentId);
+    syncMessage.textContent = dismissed ? '进度保存不可用' : message;
+    if (dismissed) metaEl?.append(compactSyncStatus);
+    else compactSyncStatus.remove();
+    dismissSyncButton.hidden = type !== 'unsupported' || dismissed;
     adoptSavedButton.hidden = type !== 'conflict';
     continueHereButton.hidden = type !== 'conflict' && type !== 'version-changed';
   },
@@ -307,7 +332,7 @@ const isChmFormat = (format) => normalizeFormat(format) === 'chm';
 const isEpubFormat = (format) => normalizeFormat(format) === 'epub';
 const isTxtFormat = (format) => normalizeFormat(format) === 'txt';
 const getReadingFraction = (index, ratio, count) => sectionReadingProgress(index, ratio, count,
-  !!stage && stage.scrollTop > 0 && stage.scrollTop + stage.clientHeight >= stage.scrollHeight - 2);
+  !!bookEnd?.atEnd());
 const isScrollReaderFormat = (format) => SCROLL_READER_FORMATS.has(normalizeFormat(format));
 const getReaderModeForFormat = (format) => (isScrollReaderFormat(format) || isChmFormat(format) ? 'scroll' : 'single');
 const isPagedReaderMode = (readerMode) => readerMode === 'single' || readerMode === 'double';
@@ -425,9 +450,10 @@ const restoreGenericScrollPosition = async (rendition, position, openToken) => {
     try {
       if (path) node = doc.evaluate(`/html${path}`, doc, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
     } catch (error) { /* An obsolete native path falls back to the chapter start. */ }
-    if (!node && position.text) {
+    const text = String(position.text || '').trim();
+    if (text && !node?.textContent.trim().startsWith(text)) {
       node = [...doc.body.querySelectorAll('p,h1,h2,h3,h4,h5,h6,li,div,blockquote,pre')]
-        .find((element) => element.textContent.trim().startsWith(String(position.text).trim()));
+        .find((element) => element.textContent.trim().startsWith(text)) || node;
     }
     if (node?.getBoundingClientRect) offset = node.getBoundingClientRect().top + (doc.defaultView?.scrollY || 0);
   }
@@ -1500,6 +1526,7 @@ const mountTxtChapterIntoSlot = async (slot, chunkDoc, index, token) => {
   slot.innerHTML = '';
   const iframe = document.createElement('iframe');
   iframe.className = 'reader-txt-iframe';
+  iframe.setAttribute('scrolling', 'no');
   iframe.setAttribute('sandbox', 'allow-same-origin');
   iframe.setAttribute('loading', 'eager');
   iframe.setAttribute('referrerpolicy', 'same-origin');
@@ -1513,6 +1540,7 @@ const mountTxtChapterIntoSlot = async (slot, chunkDoc, index, token) => {
   doc.open();
   doc.write(`<!doctype html><html><head><meta charset="utf-8"></head><body>${paragraphs}</body></html>`);
   doc.close();
+  iframe.dataset.readerContentLoaded = 'yes';
   applyDefaultIframeStyle(doc);
   applyScrollLayout(doc);
   bindIframeInteractions(doc, handleReadingKey);
@@ -2090,6 +2118,7 @@ const bindIframeInteractions = (doc, handleKeydown) => {
     doc.__recollReaderKeybound = true;
   }
   bindReadingExtras(doc);
+  bookEnd?.bind(doc);
   bindTouchNavigationTarget(doc, () => {
     if (doc.documentElement && doc.documentElement.clientWidth) {
       return doc.documentElement.clientWidth;
@@ -2650,7 +2679,7 @@ const openPdfDocument = async (item, openToken) => {
   // Verify the session before PDF.js starts authenticated streaming and range
   // requests. The viewer can then paint without waiting for the entire file.
   await fetchReaderResponse(item.url, { method: 'HEAD' });
-  const { createPdfRendition } = await import('./pdf-adapter.js');
+  const { createPdfRendition } = await import('./pdf-adapter.js?v=reader-continuity-1');
   if (openToken !== state.openToken || accountSync.stopped) return;
   const pendingRestore = state.pendingRestorePosition?.path === item.path ? state.pendingRestorePosition.position : null;
   const rendition = await createPdfRendition(new URL(item.url, window.location.href).href, {
@@ -2697,10 +2726,14 @@ const finishDocumentOpen = async (item, openToken) => {
   await new Promise((resolve) => window.requestAnimationFrame(resolve));
   await new Promise((resolve) => window.requestAnimationFrame(resolve));
   if (openToken !== state.openToken || accountSync.stopped) return;
-  const saved = state.openRestorePosition;
-  if (saved?.textAnchor) {
+  const anchor = state.openRestorePosition?.textAnchor;
+  if (anchor) {
     await settleReaderLayout();
-    restoreTextAnchor(stage, getReadingDocuments(), saved.textAnchor);
+    // Earlier DOCX anchors were relative to a single paged section.
+    const scrollAnchor = normalizeFormat(item.format) === 'docx'
+      ? { ...anchor, sectionIndex: 0, scrollContainer: 'stage' }
+      : anchor;
+    restoreTextAnchor(stage, getReadingDocuments(), scrollAnchor);
   }
   if (openToken !== state.openToken || accountSync.stopped) return;
   state.isOpening = false;
@@ -2719,6 +2752,7 @@ const openIndex = async (index) => {
   if (!state.items.length || accountSync.stopped) return;
   const previousItem = state.current;
   persistCurrentPosition();
+  bookEnd?.reset();
   state.temporaryPosition = null;
   state.lastTextAnchor = null;
   const openToken = ++state.openToken;
@@ -2730,6 +2764,7 @@ const openIndex = async (index) => {
   state.currentIndex = nextIndex;
   state.current = item;
   state.isOpening = true;
+  state.openFailed = false;
   state.readerMode = viewportConfig.readerMode;
   state.mobileFlag = viewportConfig.isMobile;
   syncReaderModeUi();
@@ -2744,7 +2779,8 @@ const openIndex = async (index) => {
     if (openToken !== state.openToken || accountSync.stopped) return;
     state.openRestorePosition = state.pendingRestorePosition && state.pendingRestorePosition.path === item.path
       ? state.pendingRestorePosition.position : loadPosition(item);
-    if (normalizeFormat(item.format) === 'pdf') {
+    const format = normalizeFormat(item.format);
+    if (format === 'pdf') {
       await openPdfDocument(item, openToken);
       return;
     }
@@ -2798,38 +2834,46 @@ const openIndex = async (index) => {
     }
     const response = await fetchReaderResponse(item.url);
     const buffer = await response.arrayBuffer();
-    if (!['html', 'htm', 'xhtml'].includes(normalizeFormat(item.format))) await ensureKookitRuntime();
-    const Kookit = window.Kookit;
-    const options = {
-      format: item.format.toUpperCase(),
-      readerMode: viewportConfig.readerMode,
-      charset: undefined,
-      animation: '',
-      convertChinese: 'no',
-      fullTranslationMode: 'no',
-      textOrientation: 'horizontal',
-      parserRegex: '',
-      isDarkMode: 'no',
-      isMobile: viewportConfig.isMobile,
-      password: '',
-      isScannedPDF: 'no',
-      backgroundColor: '',
-      isConvertPDF: 'no',
-      ocrLang: '',
-      ocrEngine: 'paddle',
-      isAllowScript: 'no',
-      isBionic: 'no',
-      isIndent: 'no',
-      isHyphenation: 'no',
-      isStartFromEven: 'no',
-      scale: 1,
-    };
     let rendition;
-    if (['html', 'htm', 'xhtml'].includes(normalizeFormat(item.format))) {
-      const { createHtmlRendition } = await import('./html-adapter.js');
-      rendition = createHtmlRendition(buffer, { url: item.url, title: item.title || item.name,
+    if (HTML_READER_FORMATS.has(format)) {
+      let html = buffer;
+      if (format === 'docx') {
+        const { convertDocxToHtml } = await importKookit();
+        html = await convertDocxToHtml(buffer);
+      } else if (item.readOnlyPreview && !response.headers.get('content-type')?.includes('text/html')) {
+        html = `<pre style="white-space:pre-wrap">${escapeHtml(new TextDecoder().decode(buffer))}</pre>`;
+      }
+      const { createHtmlRendition } = await import('./html-adapter.js?v=word-reader-1');
+      rendition = createHtmlRendition(html, { url: item.url, title: item.title || item.name,
         policy: DOCUMENT_CSP, prepareDocument: applyDefaultIframeStyle });
-    } else rendition = window.BookHelper.getRendition(buffer, options, Kookit);
+    } else {
+      await ensureKookitRuntime();
+      const options = {
+        format: item.format.toUpperCase(),
+        readerMode: viewportConfig.readerMode,
+        charset: undefined,
+        animation: '',
+        convertChinese: 'no',
+        fullTranslationMode: 'no',
+        textOrientation: 'horizontal',
+        parserRegex: '',
+        isDarkMode: 'no',
+        isMobile: viewportConfig.isMobile,
+        password: '',
+        isScannedPDF: 'no',
+        backgroundColor: '',
+        isConvertPDF: 'no',
+        ocrLang: '',
+        ocrEngine: 'paddle',
+        isAllowScript: 'no',
+        isBionic: 'no',
+        isIndent: 'no',
+        isHyphenation: 'no',
+        isStartFromEven: 'no',
+        scale: 1,
+      };
+      rendition = window.BookHelper.getRendition(buffer, options, window.Kookit);
+    }
     // The bundled reader enables scripts for touch devices and PDFs by
     // default, overriding its constructor options. Set the instance itself.
     rendition.isAllowScript = 'no';
@@ -2915,12 +2959,16 @@ const openIndex = async (index) => {
     await finishDocumentOpen(item, openToken);
   } catch (err) {
     console.error(err);
-    if (openToken === state.openToken && !accountSync.stopped) setError((err && err.message) || '打开阅读器失败');
+    if (openToken === state.openToken && !accountSync.stopped) {
+      state.openFailed = true;
+      setError((err && err.message) || '打开阅读器失败');
+    }
   } finally {
     if (openToken === state.openToken) {
       state.isOpening = false;
       updateNavigationControls();
       rememberStageSize();
+      updateReaderProgress();
     }
   }
 };
@@ -3169,6 +3217,36 @@ const handleReadingKey = (event) => {
   }
 };
 
+const bookBottomMeasurements = new WeakMap();
+const getBookContentBottom = () => {
+  if (!state.current || state.current.readOnlyPreview || state.isOpening || state.reflowing || state.layoutPending || !state.rendition) return null;
+  const format = normalizeFormat(state.current.format);
+  let node;
+  if (format === 'txt' || format === 'epub') {
+    const windowState = format === 'txt' ? state.txtWindow : state.epubWindow;
+    const count = format === 'txt' ? getTxtChunkDocList().length : getEpubChapterDocList().length;
+    const mounted = windowState.mounted.get(count - 1);
+    if (!mounted?.iframe?.contentDocument?.body || mounted.iframe.dataset.readerContentLoaded !== 'yes') return null;
+    node = mounted.iframe;
+  } else if (format === 'pdf') node = stage.querySelector('.reader-pdf-pages .page:last-child');
+  else if (['html', 'htm', 'xhtml', 'xml', 'md', 'mhtml'].includes(format)) node = getActiveContentFrame();
+  if (!node) return null;
+  const bounds = node.getBoundingClientRect();
+  let bottom = bounds.bottom;
+  if (node.tagName === 'IFRAME' && node.contentDocument?.body) {
+    const key = `${node.clientWidth}:${node.clientHeight}:${state.fontSize}`;
+    let measured = bookBottomMeasurements.get(node);
+    if (!measured || measured.key !== key || measured.settings !== readerSettings?.values) {
+      const range = node.contentDocument.createRange(); range.selectNodeContents(node.contentDocument.body);
+      measured = { key, settings: readerSettings?.values, bottom: range.getBoundingClientRect().bottom };
+      bookBottomMeasurements.set(node, measured);
+    }
+    bottom = bounds.top + measured.bottom;
+  }
+  return bottom - stage.getBoundingClientRect().top + stage.scrollTop;
+};
+const updateBookEnd = () => bookEnd?.update();
+
 const updateReaderProgress = (position = state.rendition?.getPosition?.() || (isChmFormat(state.current?.format) ? getChmCurrentPosition() : null)) => {
   if (!position || !state.current) return;
   let fraction = Number(position.percentage);
@@ -3183,12 +3261,29 @@ const updateReaderProgress = (position = state.rendition?.getPosition?.() || (is
   const value = Math.max(0, Math.min(1, fraction));
   const slider = el('reader-progress-range');
   if (slider && document.activeElement !== slider) slider.value = String(Math.round(value * 1000));
-  slider?.setAttribute('aria-valuetext', `${Math.round(value * 100)}%`);
-  const label = el('reader-progress-label');
-  if (label) label.textContent = `${position.pageNumber ? `第 ${position.pageNumber} 页 · ` : ''}${Math.round(value * 100)}%`;
+  state.progressValue = value;
+  state.progressPosition = position;
   const index = format === 'txt' ? Number(position.chunkIndex) : format === 'pdf' ? Number(position.pageNumber) - 1 : Number(position.chapterDocIndex);
   if (['html', 'htm', 'xhtml', 'md', 'xml', 'mhtml'].includes(format)) readerNavigation?.updateActiveHeading();
   else if (Number.isFinite(index)) readerNavigation?.setActive(index);
+  renderProgressLabel();
+  updateBookEnd();
+};
+const renderProgressLabel = () => {
+  if (!state.current) return;
+  const position = state.progressPosition || {}, format = normalizeFormat(state.current.format);
+  let location = readerNavigation?.progressLocation();
+  if (format === 'pdf') location = { index: Number(position.pageNumber), count: state.rendition?.pdf?.numPages, unit: '页' };
+  if (!location && ['txt', 'epub'].includes(format)) location = {
+    index: Number(format === 'txt' ? position.chunkIndex : position.chapterDocIndex) + 1,
+    count: format === 'txt' ? getTxtChunkDocList().length : getEpubChapterDocList().length, unit: '区段',
+  };
+  const detail = location && location.count > 0 && location.index > 0 && location.index <= location.count
+    ? ` · 第 ${location.index}/${location.count} ${location.unit}` : '';
+  const text = `${Math.round((state.progressValue || 0) * 100)}%${detail}`;
+  el('reader-progress-range')?.setAttribute('aria-valuetext', text);
+  const label = el('reader-progress-label');
+  if (label) label.textContent = text;
 };
 
 const updateDocumentControls = () => {
@@ -3348,7 +3443,7 @@ const initializeReadingTools = () => {
       txt: { manifest: state.txtWindow.manifest, contentUrl: state.txtWindow.contentUrl }, chm: { toc: state.currentChmManifest?.toc },
       fetchText: async (url, options) => (await fetchReaderResponse(url, options)).text(),
       fetchJson: async (url, options) => (await fetchReaderResponse(url, options)).json(),
-    }), onNavigate: navigateReaderTarget, onReturn: returnToReading, onState: updateNavigationControls,
+    }), onNavigate: navigateReaderTarget, onReturn: returnToReading, onState: () => { updateNavigationControls(); renderProgressLabel(); },
     onKeep: async () => {
       const token = state.openToken, navigationToken = state.navigationToken;
       await waitForCondition(() => !state.layoutPending && !state.reflowing || accountSync.stopped || token !== state.openToken);
@@ -3400,6 +3495,29 @@ const initializeReadingTools = () => {
       state.lastTextAnchor = captureTextAnchor(stage, getReadingDocuments()); updateReaderProgress();
     }, 120);
   }, { passive: true });
+  const openFollowingBook = async (previousIndex = state.currentIndex, nextIndex = previousIndex + 1) => {
+    const token = state.openToken;
+    // A visible button remains actionable while toolbar/layout animations settle.
+    await waitForCondition(() => !state.reflowing && !state.layoutPending || token !== state.openToken || accountSync.stopped);
+    if (token !== state.openToken || accountSync.stopped) return;
+    await openIndex(nextIndex);
+    if (!state.openFailed || accountSync.stopped || state.currentIndex !== nextIndex) return;
+    const actions = document.createElement('div'); actions.className = 'reader-book-end';
+    const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'reader-button'; retry.textContent = '重试下一本';
+    const back = document.createElement('button'); back.type = 'button'; back.className = 'reader-button'; back.textContent = '返回上一本';
+    let busy = false;
+    retry.addEventListener('click', async () => { if (busy) return; busy = true; await openFollowingBook(previousIndex, nextIndex); });
+    back.addEventListener('click', async () => { if (busy) return; busy = true; await openIndex(previousIndex); });
+    actions.append(retry, back); stage.append(actions); retry.focus({ preventScroll: true });
+  };
+  bookEnd = new ReaderBookEnd({ stage, getBoundary: getBookContentBottom,
+    getNext: () => state.items[state.currentIndex + 1] || null,
+    isLast: () => mode === 'folder' && !state.folderMeta?.truncated && state.currentIndex === state.items.length - 1,
+    canInteract: () => !state.isOpening && !state.reflowing && !state.layoutPending && !accountSync.stopped
+      && el('reader-settings-panel')?.hidden !== false && !document.querySelector('dialog[open]')
+      && (!isMobileViewport() || sidebar.classList.contains('is-hidden')),
+    onNext: () => openFollowingBook(),
+  });
   readerExperience = new ReaderExperience({
     root: readerApp, stage,
     openSidebar: () => { openSidebar(); scheduleLayoutSync(true); },

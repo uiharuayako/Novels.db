@@ -17,12 +17,14 @@ import tempfile
 import threading
 import shlex
 import posixpath
+import pickle
 import zipfile
 import sqlite3
 import secrets
 import random
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
+from pathlib import Path
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from html import escape as html_escape
@@ -32,10 +34,12 @@ import account_web
 from accounts import Store, NotFound, ValidationError, INTEGER_PREFERENCES
 from webui_data import ApplicationData
 from shares import ShareLinks
+from file_browser import DirectoryPager, CursorExpired
 
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 bottle.TEMPLATE_PATH.insert(0, os.path.join(APP_ROOT, 'views'))
 account_store = Store()
+file_pager = DirectoryPager()
 
 def msg(s):
     print("%s" % s, file=sys.stderr)
@@ -64,6 +68,7 @@ DEFAULTS = {
     'maxchars': 500,
     'maxresults': 500,
     'perpage': 500,
+    'search_timeout': 30,
     'csvfields': 'filename title author size time mtype url',
     'title_link': 'download',
     'collapsedups': 0,
@@ -1057,7 +1062,26 @@ def get_reader_path_for_doc(doc, config):
 def build_reader_item(doc, config, path):
     name = get_doc_display_name(doc)
     reader_format = get_reader_format_from_name(name, getattr(doc, "mtype", ""))
-    token = make_reader_token(path, getattr(doc, "mtype", ""), name)
+    # Body resources and progress must refer to the same registered source.
+    # Container members keep their own identity and cannot use a parent token.
+    ref = appdata.register_doc(doc, config)
+    if ref['ipath']:
+        # Use Recoll's existing member extraction/preview, never the bytes of
+        # the parent archive. This read-only source retains its member ID.
+        preview_query = dict(bottle.request.query)
+        preview_query['highlight'] = '0'
+        if getattr(doc, 'rcludi', ''):
+            preview_query['rcludi'] = doc.rcludi
+        preview_index = max(0, select_int([bottle.request.query.get('resnum')], default=0))
+        return appdata.reader_metadata({
+            'name': name, 'title': getattr(doc, 'title', '') or name,
+            'author': getattr(doc, 'author', '') or '', 'path': path,
+            'format': 'html', 'sourceFormat': reader_format, 'readOnlyPreview': True,
+            'url': account_web.app_url(f'/preview/{preview_index}?{urlencode(preview_query)}'),
+            'supported': True,
+        }, doc=doc, config=config)
+    token = appdata.token_for_path(path, getattr(doc, "mtype", ""), name,
+                                   document_id=ref['id'])
     item = {
         "name": name,
         "title": select([getattr(doc, "title", ""), name, "?"], [None, ""]),
@@ -1277,6 +1301,7 @@ def get_config():
                ("maxresults", 1), ("perpage", 1), ("csvfields", 0), ("title_link", 0),
                ("collapsedups", 1), ("synonyms", 0), ("noresultlinks", 1), ("logquery", 1),
                ("shortenpaths", 1), ("permlinks", 1), ("res_permlink", 1), ("queryfrag", 0),
+               ("search_timeout", 1),
                ]
     defaults = dict(DEFAULTS)
     for k, isint in fetches:
@@ -1284,6 +1309,8 @@ def get_config():
         if value is not None:
             defaults[k] = int(value) if isint else value
     config.update(defaults)
+    if config['search_timeout'] <= 0:
+        raise ValueError('webui_search_timeout must be positive')
     config['locked_search_options'] = (
         {k: defaults[k] for k in ('stem', 'collapsedups')}
         if int(rclconf.getConfParam('webui_nosettings') or 0) else {})
@@ -1542,9 +1569,40 @@ def put_cached_snippet(key, snippet):
 #{{{ recoll_search
 def recoll_search(q):
     config = get_config()
+    # Recoll's native calls hold the GIL. Run them outside the web process so a
+    # slow wildcard expansion cannot block unrelated requests, and can be stopped.
+    qs = query_to_recoll_string(q)
+    if config.get('queryfrag'):
+        qs += ' ' + config['queryfrag']
+    with _g_snippet_cache_lock:
+        cached = [(key, value) for key, value in _g_snippet_cache.items() if key[0] == qs]
+    try:
+        completed = subprocess.run(
+            [sys.executable, os.path.join(APP_ROOT, 'search_worker.py')],
+            input=pickle.dumps((q, config, bottle.request.path, cached)),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+            timeout=config['search_timeout'])
+    except subprocess.TimeoutExpired:
+        bottle.abort(504, '搜索超时（超过 %s 秒），请缩小关键词范围或减少通配符后重试。' % config['search_timeout'])
+    except subprocess.CalledProcessError as exc:
+        msg(exc.stderr.decode('utf-8', 'replace'))
+        raise
+    if completed.stderr:
+        msg(completed.stderr.decode('utf-8', 'replace'))
+    response = pickle.loads(completed.stdout)
+    if 'error' in response:
+        bottle.abort(response['status'], response['error'])
+    q.update(response['query'])
+    config.update(response['config'])
+    for key, snippet in response['snippets']:
+        put_cached_snippet(key, snippet)
+    return response['result']
+
+
+def run_recoll_search(q, config, path):
     tstart = datetime.datetime.now()
     results = []
-    query, _, qs = recoll_initsearch(q)
+    query, _, qs = recoll_initsearch(q, config)
     nres = query.rowcount
     if "rcludi" in q and q["rcludi"]:
         rcludi = q["rcludi"]
@@ -1561,7 +1619,7 @@ def recoll_search(q):
         q['page'] = 1
     # "Show all" is still bounded by the administrator's HTML page limit.
     # Explicit JSON/CSV exports retain their existing full-result semantics.
-    if bottle.request.path not in ('/json', '/csv') and config['rclc_maxperpage']:
+    if path not in ('/json', '/csv') and config['rclc_maxperpage']:
         config['perpage'] = min(config['perpage'], config['rclc_maxperpage'])
     offset = (q['page'] - 1) * config['perpage']
 
@@ -1660,6 +1718,149 @@ def server_staticdoc(path):
                               root=os.path.dirname(payload['path']), etag=False,
                               headers={'Cache-Control': 'private, no-store'})
 #}}}
+#{{{ file browser
+def file_browser_path(value, config, roots=None, allow_non_utf8=False):
+    if (not value or len(value) > 4096 or '\x00' in value or
+            not os.path.isabs(value) or '..' in value.split(os.sep)):
+        bottle.abort(400, '无效文件路径')
+    path = os.path.realpath(value)
+    if not allow_non_utf8:
+        try:
+            path.encode('utf-8')
+        except UnicodeEncodeError:
+            bottle.abort(400, '路径名称不是有效 UTF-8，暂时无法打开')
+    roots = roots if roots is not None else [os.path.realpath(root) for root in config['dirs']]
+    for root in roots:
+        if os.path.commonpath([path, root]) == root:
+            relative = os.path.relpath(path, root)
+            if relative == '.' or not any(part.startswith('.') for part in relative.split(os.sep)):
+                if is_allowed_reader_path(path, config):
+                    return path
+    bottle.abort(403, '此路径不在可浏览的文库范围内')
+
+
+def file_browser_url(path=''):
+    return account_web.app_url('/files') + ('?' + urlencode({'path': path}) if path else '')
+
+
+def file_browser_item(name, path, kind):
+    format_ = get_reader_format_from_name(path) if kind == 'file' else ''
+    item = dict(name=name, path=path, kind=kind, format=format_, supported=False, url=None)
+    try:
+        name.encode('utf-8')
+        path.encode('utf-8')
+    except UnicodeEncodeError:
+        # Linux preserves undecodable filename bytes with surrogateescape.
+        # Show their escaped bytes without guessing an encoding or making a URL.
+        item.update(name=os.fsencode(name).decode('ascii', 'backslashreplace'), path=None,
+                    unavailable_reason='名称或目标路径不是有效 UTF-8，无法打开')
+        return item
+    if kind == 'directory':
+        item['url'] = file_browser_url(path)
+    else:
+        item['supported'] = format_ in READER_SUPPORTED_FORMATS
+        if item['supported']:
+            item['url'] = account_web.app_url('/files/open') + '?' + urlencode({'path': path})
+    return item
+
+
+def file_browser_listing():
+    config = get_config()
+    value = bottle.request.query.getunicode('path', '')
+    cursor = bottle.request.query.get('cursor', '')
+    roots = list(dict.fromkeys(os.path.realpath(root) for root in config['dirs']))
+    crumbs = [dict(name='文库根目录', path='', url=file_browser_url())]
+    if not value:
+        if cursor:
+            bottle.abort(400, '请先选择文库目录')
+        return dict(path='', title='文库根目录', breadcrumbs=crumbs, parent=None,
+                    items=[file_browser_item(os.path.basename(root) or root, root, 'directory') for root in roots],
+                    next_cursor=None, scanned=0, page_size=file_pager.page_size)
+    path = file_browser_path(value, config, roots)
+    if not os.path.isdir(path):
+        bottle.abort(404, '文件夹已不存在或不可用')
+    root = max((root for root in roots if os.path.commonpath([path, root]) == root), key=len)
+    current = root
+    crumbs.append(dict(name=os.path.basename(root) or root, path=root, url=file_browser_url(root)))
+    relative = os.path.relpath(path, root)
+    if relative != '.':
+        for part in relative.split(os.sep):
+            current = os.path.join(current, part)
+            crumbs.append(dict(name=part, path=current, url=file_browser_url(current)))
+    owner = (account_web.current_user()['id'], account_web.current_session()['id'])
+    entries, next_cursor = file_pager.read(path, owner, appdata.scope(config), cursor)
+    items = []
+    for entry in entries:
+        if entry.name.startswith('.'):
+            continue
+        try:
+            safe_path = file_browser_path(entry.path, config, roots, allow_non_utf8=True) if entry.is_symlink() else entry.path
+            if entry.is_dir():
+                kind = 'directory'
+            elif entry.is_file():
+                kind = 'file'
+            else:
+                continue
+        except bottle.HTTPError as error:
+            if error.status_code == 403:
+                continue
+            raise
+        except FileNotFoundError:
+            continue
+        items.append(file_browser_item(entry.name, safe_path, kind))
+    return dict(path=path, title=os.path.basename(path) or path, breadcrumbs=crumbs,
+                parent=file_browser_url(os.path.dirname(path) if path != root else ''),
+                items=items, next_cursor=next_cursor, scanned=len(entries), page_size=file_pager.page_size)
+
+
+@bottle.route('/files')
+@bottle.view('files')
+def file_browser():
+    return dict(initial_path=bottle.request.query.getunicode('path', ''))
+
+
+@bottle.route('/api/files')
+def file_browser_api():
+    bottle.response.content_type = 'application/json; charset=utf-8'
+    try:
+        data = file_browser_listing()
+    except CursorExpired as error:
+        bottle.response.status = 409
+        data = dict(message=str(error))
+    except bottle.HTTPError as error:
+        bottle.response.status = error.status_code
+        data = dict(message=str(error.body))
+    except PermissionError:
+        bottle.response.status = 403
+        data = dict(message='没有读取此文件夹的权限。')
+    except (FileNotFoundError, NotADirectoryError):
+        bottle.response.status = 404
+        data = dict(message='文件夹已不存在或不可用。')
+    except OSError:
+        bottle.response.status = 503
+        data = dict(message='目录暂时无法读取，请稍后重试。')
+    return json.dumps(data, ensure_ascii=False)
+
+
+@bottle.route('/files/open')
+def file_browser_open():
+    config = get_config()
+    path = file_browser_path(bottle.request.query.getunicode('path', ''), config)
+    if not os.path.isfile(path):
+        bottle.abort(404, '文件已不存在或不可用')
+    if not os.access(path, os.R_OK):
+        bottle.abort(403, '没有读取此文件的权限')
+    format_ = get_reader_format_from_name(path)
+    if format_ not in READER_SUPPORTED_FORMATS:
+        bottle.abort(400, '此文件暂不支持在线阅读')
+    try:
+        document = appdata.register_path(path, format=format_, config=config)
+    except (NotFound, ValidationError) as error:
+        bottle.abort(404, str(error))
+    bottle.redirect(account_web.app_url('/reader') + '?' + urlencode({
+        'document_id': document['id'], 'return_to': file_browser_url(os.path.dirname(path)),
+    }), 303)
+#}}}
 #{{{ main
 @bottle.route('/')
 @bottle.view('main')
@@ -1706,17 +1907,29 @@ def results():
     qs = query_to_recoll_string(query)
     try:
         res, nres, timer = recoll_search(query)
-    except (ValidationError, bottle.HTTPError):
+    except bottle.HTTPError:
+        if event:
+            account_store.fail_search(account_web.current_user()['id'], event['id'])
+        raise
+    except ValidationError:
         if event:
             account_store.fail_search(account_web.current_user()['id'], event['id'])
         bottle.abort(400, '查询执行失败，请检查检索表达式和筛选条件')
     recommendation_ids = []
-    for result in res:
+    try:
+        # Prepare source paths before the single short registration transaction.
+        refs = appdata.register_docs([
+            SimpleNamespace(**dict(result, url=result.get('source_url') or result['url'].split('#', 1)[0]))
+            for result in res
+        ], config)
+    except (NotFound, ValidationError, OSError, sqlite3.Error):
+        refs = [None] * len(res)
+    for result, ref in zip(res, refs):
         try:
-            # Use the source URL before PDF search anchors were appended.
-            source = result.get('source_url') or result['url'].split('#', 1)[0]
-            ref = appdata.register_doc(SimpleNamespace(**dict(result, url=source)), config)
+            if ref is None:
+                raise NotFound('文档不可用')
             result['document_id'] = ref['id']
+            result['reader_resumable'] = not bool(ref['ipath'])
             result['reader_supported'] = ref['format'] in READER_SUPPORTED_FORMATS
             result['shelf_handle'] = account_web.sign_payload({'document_id': ref['id']}, 'shelf-add')
             result['on_shelf'] = account_store.is_on_shelf(account_web.current_user()['id'], ref['id'])
@@ -1788,6 +2001,7 @@ def reader():
         "query_string": bottle.request.query_string,
         "results_query_string": results_query_string,
         "results_url": results_url,
+        "results_label": '返回文件浏览' if urlsplit(results_url).path == account_web.app_url('/files') else '返回搜索结果',
         'reader_config_json': json.dumps(reader_config, ensure_ascii=True).replace('<', '\\u003c'),
     }
 #}}}
@@ -2341,20 +2555,39 @@ def reader_chm_render_content(ticket, relpath=''):
     return raw
 
 #{{{ preview
+def convert_word_preview(path):
+    try:
+        with tempfile.TemporaryDirectory(prefix='recoll-word-', dir=g_tmpdir) as directory:
+            output = Path(directory)
+            profile = (output / 'profile').as_uri()
+            subprocess.run([
+                'soffice', '--headless', '--safe-mode', '--norestore',
+                f'-env:UserInstallation={profile}',
+                '--convert-to', 'html:HTML (StarWriter):EmbedImages', '--outdir', directory, path,
+            ], check=True, capture_output=True, timeout=30)
+            text = (output / Path(path).with_suffix('.html').name).read_text(encoding='utf-8')
+    except (OSError, subprocess.SubprocessError) as exc:
+        msg(f'Word preview conversion failed: {exc}')
+        bottle.abort(422, 'Word 文档预览转换失败，请下载原文件查看')
+    return text.replace('<head>', '<head><meta name="viewport" content="width=device-width, initial-scale=1">'
+                        '<style>img{max-width:100%;height:auto}</style>', 1)
+
+
 @bottle.route('/preview/<resnum:int>')
 def preview(resnum):
     config, query, rclq, db, doc = resolve_doc_from_result_query(resnum)
-    xt = rclextract.Extractor(doc)
-    tdoc = xt.textextract(doc.ipath)
-    if tdoc.mimetype == 'text/html':
-        ishtml = 1
-        bottle.response.content_type = 'text/html; charset=utf-8'
+    if doc.mimetype == 'application/msword' and not doc.ipath:
+        # Recoll's text extractor omits embedded Word images from the preview.
+        text = convert_word_preview(normalize_file_path(doc.url))
+        ishtml = True
     else:
-        ishtml = 0
-        bottle.response.content_type = 'text/plain; charset=utf-8'
+        tdoc = rclextract.Extractor(doc).textextract(doc.ipath)
+        text = tdoc.text
+        ishtml = tdoc.mimetype == 'text/html'
+    bottle.response.content_type = 'text/html; charset=utf-8' if ishtml else 'text/plain; charset=utf-8'
     if 'highlight' in query and query['highlight']:
         hl = HlMeths()
-        txt = rclq.highlight(tdoc.text, ishtml=ishtml, methods=hl)
+        txt = rclq.highlight(text, ishtml=ishtml, methods=hl)
         pos = txt.find('<head>')
         ssref = '<link rel="stylesheet" type="text/css" href="../static/style.css">'
         if pos >= 0:
@@ -2367,7 +2600,7 @@ def preview(resnum):
         return txt
     bottle.response.headers['Vary'] = 'Cookie'
     bottle.response.headers['No-Vary-Search'] = 'key-order'
-    return tdoc.text
+    return text
 #}}}
 #{{{ download
 @bottle.route('/download/<resnum:int>')

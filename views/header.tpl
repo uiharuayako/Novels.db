@@ -27,6 +27,7 @@
 %current_path = bottle.request.path
 <nav class="account-nav" aria-label="主要导航">
     <a href="{{app_url('/')}}" aria-current="{{'page' if current_path in ('/', '/results', '/search') else 'false'}}">发现文档</a>
+    <a href="{{app_url('/files')}}" aria-current="{{'page' if current_path.startswith('/files') else 'false'}}">文件浏览</a>
     <a href="{{app_url('/bookshelf')}}" aria-current="{{'page' if current_path == '/bookshelf' else 'false'}}">我的书架</a>
     <a href="{{app_url('/history')}}" aria-current="{{'page' if current_path == '/history' else 'false'}}">历史记录</a>
     <a href="{{app_url('/shares')}}" aria-current="{{'page' if current_path.startswith('/shares') else 'false'}}">我的分享</a>

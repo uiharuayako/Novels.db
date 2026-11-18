@@ -234,28 +234,60 @@ class ApplicationData:
         return '%s:%s' % (stat.st_mtime_ns, stat.st_size)
 
     def register_path(self, path, title='', format='', config=None, ipath='', rcludi=''):
+        return self.store.register_document(**self._path_registration(
+            path, title, format, config, ipath, rcludi))
+
+    def _path_registration(self, path, title='', format='', config=None, ipath='', rcludi=''):
         config = config or self.webui.get_config()
         path = os.path.realpath(path)
         if not self.webui.is_allowed_reader_path(path, config) or not os.path.isfile(path):
             raise NotFound('文档不可用')
-        return self.store.register_document(
-            self.scope(config), 'file://' + quote(path, safe='/'), path,
+        return dict(
+            library_key=self.scope(config), source_url='file://' + quote(path, safe='/'), source_path=path,
             ipath=ipath, rcludi=rcludi, title=title or os.path.basename(path),
             format=format or self.webui.get_reader_format_from_name(path),
             content_version=self.version(path))
 
     def register_doc(self, doc, config=None):
+        return self.store.register_document(**self._doc_registration(doc, config))
+
+    def native_txt_page(self, path, ipath, format):
+        # Recoll's textfilepagekbs pages plain files by byte offset. Those
+        # offsets identify search pages, not container members or separate books.
+        return (format == 'txt' and self.webui.get_reader_format_from_name(path) == 'txt'
+                and bool(re.fullmatch(r'[0-9]+', str(ipath or '')))
+                and 0 <= int(ipath) < os.path.getsize(path))
+
+    def _doc_registration(self, doc, config=None):
         config = config or self.webui.get_config()
         url = getattr(doc, 'url', '') or ''
         if urlsplit(url).scheme not in ('', 'file'):
             raise NotFound('该来源不支持书架与继续阅读')
-        return self.register_path(
-            self.webui.normalize_file_path(url),
-            title=getattr(doc, 'title', '') or getattr(doc, 'filename', ''),
-            format=self.webui.get_reader_format_from_name(
-                getattr(doc, 'filename', ''), getattr(doc, 'mtype', '')),
-            config=config, ipath=getattr(doc, 'ipath', '') or '',
+        path = self.webui.normalize_file_path(url)
+        format = self.webui.get_reader_format_from_name(
+            getattr(doc, 'filename', ''), getattr(doc, 'mtype', ''))
+        ipath = getattr(doc, 'ipath', '') or ''
+        if (getattr(doc, 'mtype', '') == 'text/plain'
+                and getattr(doc, 'filename', '') == os.path.basename(path)
+                and self.native_txt_page(path, ipath, format)):
+            ipath = ''
+        return self._path_registration(
+            path, title=getattr(doc, 'title', '') or getattr(doc, 'filename', ''),
+            format=format, config=config, ipath=ipath,
             rcludi=getattr(doc, 'rcludi', '') or '')
+
+    def register_docs(self, docs, config=None):
+        refs = [None] * len(docs)
+        prepared, positions = [], []
+        for index, doc in enumerate(docs):
+            try:
+                prepared.append(self._doc_registration(doc, config))
+            except (NotFound, ValidationError, OSError):
+                continue
+            positions.append(index)
+        for index, ref in zip(positions, self.store.register_documents(prepared)):
+            refs[index] = ref
+        return refs
 
     def register_folder(self, root, config=None):
         config = config or self.webui.get_config()
@@ -277,6 +309,10 @@ class ApplicationData:
                 (is_folder and not allow_folder) or
                 not (os.path.isdir(doc['source_path']) if is_folder else os.path.isfile(doc['source_path']))):
             raise NotFound('文件夹不可用' if is_folder else '文档不可用')
+        if self.native_txt_page(doc['source_path'], doc.get('ipath'), doc['format']):
+            # Resolve pre-fix search-page IDs as aliases without deleting their
+            # old records or replacing any existing whole-book progress.
+            doc = self.register_path(doc['source_path'], doc['title'], doc['format'], config)
         if doc.get('ipath') and not allow_container:
             raise ValidationError('该容器内文档暂不支持继续阅读，请通过搜索结果预览或下载')
         doc['content_version'] = '' if is_folder else self.version(doc['source_path'])
@@ -314,6 +350,7 @@ class ApplicationData:
         ref = self.register_doc(doc, config) if doc is not None else self.register_path(
             item['path'], item.get('title', ''), item.get('format', ''), config)
         item['documentId'] = ref['id']
+        item['progressSupported'] = not bool(ref.get('ipath'))
         item['folder_name'] = folder_name(ref['source_path'])
         item['contentVersion'] = ref['content_version']
         settings = auth.current_settings()
@@ -344,7 +381,7 @@ class ApplicationData:
 
     def progress_response(self, document_id):
         doc = self.document(document_id)
-        row = self.store.get_progress(auth.current_user()['id'], document_id)
+        row = self.store.get_progress(auth.current_user()['id'], doc['id'])
         result = dict(row or {'position': None, 'revision': 0})
         if 'position_json' in result:
             result['position'] = json.loads(result['position_json']) if isinstance(result['position_json'], str) else result['position_json']
@@ -383,7 +420,7 @@ class ApplicationData:
             return json_response({'error': '文档内容已变化，请重新打开后选择阅读位置',
                                   'code': 'content_changed'}, 409)
         result = self.store.save_progress(
-            auth.current_user()['id'], document_id, data.get('position'),
+            auth.current_user()['id'], doc['id'], data.get('position'),
             data.get('revision'), data.get('writer_id', ''), data.get('writer_seq'),
             context['progress_epoch'], content_version=doc['content_version'],
             progress=data.get('progress'))

@@ -1,10 +1,14 @@
 """Optional real Chromium regression for converted HTML rendering and isolation."""
 from pathlib import Path
-from urllib.parse import urlsplit
+from tempfile import TemporaryDirectory
+from urllib.parse import urlencode, urlsplit
+from zipfile import ZipFile
 import json
 import os
 import shutil
 import pytest
+from test_shares_live_browser import browser, live_site
+from test_webui_integration import client_for, recoll_index, site
 
 sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
@@ -196,3 +200,37 @@ def test_html_content_progress_and_resource_isolation(mobile, empty, legacy):
         assert not external, external
         context.close()
         browser.close()
+
+
+def test_docx_reader_keeps_body_after_successive_headings(live_site, browser):
+    site, origin = live_site
+    namespace = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+    with TemporaryDirectory(dir=site.books) as directory:
+        book = Path(directory) / 'word.docx'
+        with ZipFile(book, 'w') as package:
+            package.writestr('word/styles.xml', f'<w:styles xmlns:w="{namespace}">'
+                             '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/></w:style>'
+                             '<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="Heading 2"/></w:style>'
+                             '</w:styles>')
+            paragraphs = [
+                '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Word title</w:t></w:r></w:p>',
+                '<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>First section</w:t></w:r></w:p>',
+                '<w:p><w:r><w:t>Body of the first section.</w:t></w:r></w:p>',
+                '<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>Last section</w:t></w:r></w:p>',
+                '<w:p><w:r><w:t>Body of the last section.</w:t></w:r></w:p>',
+            ]
+            package.writestr('word/document.xml', f'<w:document xmlns:w="{namespace}"><w:body>'
+                             + ''.join(paragraphs) + '</w:body></w:document>')
+        client = client_for(site)
+        page = browser.new_page()
+        try:
+            page.context.add_cookies([dict(name=cookie.name, value=cookie.value, url=origin)
+                                      for cookie in client.cookiejar])
+            page.goto(origin + '/files/open?' + urlencode({'path': str(book)}))
+            content = page.frame_locator('#page-area iframe')
+            content.get_by_text('Word title', exact=True).wait_for()
+            content.get_by_text('Body of the last section.', exact=True).wait_for()
+            assert content.locator('h1, h2').all_text_contents() == ['Word title', 'First section', 'Last section']
+            assert page.locator('#reader-app').evaluate("app => app.classList.contains('reader-scroll-mode')")
+        finally:
+            page.context.close()

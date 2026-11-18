@@ -47,21 +47,23 @@ def save_registration(client, *, enabled=True, activation_required=True, code=''
 def test_registration_creates_active_member_and_requires_explicit_login(registration):
     client = make_app(registration)
     form = registration_form(client)
+    password = 'fixture123'
     assert set(form.fields) >= {'csrf', 'next', 'username', 'password', 'activation_code'}
     assert 'email' not in form.fields and 'password_confirm' not in form.fields
-    form['username'], form['password'], form['activation_code'] = 'New-Reader', PASSWORD, ACTIVATION_CODE
+    assert form['password'].attrs['minlength'] == '10'
+    form['username'], form['password'], form['activation_code'] = 'New-Reader', password, ACTIVATION_CODE
     response = form.submit(status=302)
     parsed = urlsplit(response.location)
     assert parsed.path == '/login'
     assert parse_qs(parsed.query) == {'registered': ['1'], 'next': ['/protected']}
-    assert PASSWORD not in response.location and ACTIVATION_CODE not in response.location
+    assert password not in response.location and ACTIVATION_CODE not in response.location
     assert account_web.SESSION_COOKIE not in client.cookies
     member = next(user for user in registration.list_users() if user['username'] == 'new-reader')
     assert member['role'] == 'member' and member['status'] == 'active'
     assert member['must_change_password'] is False
     page = response.follow()
-    assert PASSWORD not in page.text and ACTIVATION_CODE not in page.text
-    assert urlsplit(login(client, 'NEW-READER').location).path == '/protected'
+    assert password not in page.text and ACTIVATION_CODE not in page.text
+    assert urlsplit(login(client, 'NEW-READER', password).location).path == '/protected'
     client.get('/protected', status=200)
 
 
@@ -88,6 +90,7 @@ def test_closed_registration_hides_link_and_rejects_direct_requests(store, users
 ])
 def test_registration_enforces_username_and_password_rules(registration, username, password):
     response = register(make_app(registration), username=username, password=password, status=400)
+    assert '密码需为 10–128 个字符。' in response.text
     assert password not in response.text
     assert ACTIVATION_CODE not in response.text
     assert len(registration.list_users()) == 2

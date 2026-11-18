@@ -76,6 +76,16 @@ export class ReaderAccountSync {
 
   async prepare(item) {
     if (this.stopped || !item?.documentId || !item.openHandle || !this.account) return null;
+    if (item.progressSupported === false) {
+      let context = this.contexts.get(item.documentId);
+      if (!context) {
+        context = { item, unsupported: true, loaded: false };
+        this.contexts.set(item.documentId, context);
+      }
+      this.active = context;
+      this.status('unsupported', '此来源暂不支持保存进度', context);
+      return null;
+    }
     const existing = this.contexts.get(item.documentId);
     if (existing?.loaded) {
       this.active = existing;
@@ -152,6 +162,7 @@ export class ReaderAccountSync {
   async rendered(item, folderKey) {
     const context = this.contexts.get(item?.documentId);
     if (!context || this.stopped) return;
+    if (context.unsupported) return;
     context.rendered = true;
     context.restored = true;
     context.folderKey = folderKey;

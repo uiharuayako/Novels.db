@@ -152,6 +152,32 @@ def test_cookie_security_does_not_trust_unconfigured_forwarded_scheme(store, use
     assert 'Secure' in response.headers['Set-Cookie']
 
 
+@pytest.mark.parametrize('peer,headers,expected', [
+    ('10.10.10.50', {}, 'http://10.10.10.101:8081'),
+    ('10.10.10.50', {'X-Forwarded-Proto': 'https', 'X-Forwarded-Host': 'spoofed.example'},
+     'http://10.10.10.101:8081'),
+    ('10.10.10.100', {'X-Forwarded-Proto': 'https', 'X-Forwarded-Host': 'library.example'},
+     'https://library.example'),
+    ('10.10.10.100', {}, 'https://10.10.10.101:8081'),
+    ('10.10.10.100', {'X-Forwarded-Proto': 'http'}, 'http://10.10.10.101:8081'),
+])
+def test_direct_and_proxied_requests_use_matching_redirects_and_cookies(store, monkeypatch, peer, headers, expected):
+    monkeypatch.setenv('RECOLL_WEBUI_TRUSTED_PROXIES', '10.10.10.100/32')
+    monkeypatch.setenv('RECOLL_WEBUI_PROXY_SCHEME', 'https')
+    client = make_app(store)
+    environ = {'REMOTE_ADDR': peer, 'HTTP_HOST': '10.10.10.101:8081'}
+    redirect = client.get('/protected', headers=headers, extra_environ=environ, status=302)
+    assert redirect.location == expected + '/login?next=%2Fprotected'
+    page = client.get('/login', headers=headers, extra_environ=environ)
+    assert ('Secure' in page.headers['Set-Cookie']) == expected.startswith('https:')
+
+
+def test_invalid_proxy_scheme_is_rejected(store, monkeypatch):
+    monkeypatch.setenv('RECOLL_WEBUI_PROXY_SCHEME', 'ftp')
+    with pytest.raises(ValueError, match='RECOLL_WEBUI_PROXY_SCHEME'):
+        make_app(store)
+
+
 def test_initial_password_gate_and_password_change_revoke_all_sessions(store):
     store.create_user('firstlogin', PASSWORD)
     client = make_app(store)

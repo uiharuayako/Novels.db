@@ -1,14 +1,16 @@
-// Preserve the complete HTML article. Splitting on headings makes continuous
-// reading, the document outline, and full-document search lose later sections.
-export function createHtmlRendition(buffer, { url, title = '', policy, prepareDocument = () => {} } = {}) {
+function decodeHtml(buffer) {
   const bytes = new Uint8Array(buffer);
   const header = new TextDecoder('ascii').decode(bytes.slice(0, 4096));
   const encoding = bytes[0] === 255 && bytes[1] === 254 ? 'utf-16le'
     : bytes[0] === 254 && bytes[1] === 255 ? 'utf-16be'
     : header.match(/(?:charset|encoding)\s*=\s*["']?\s*([\w-]+)/i)?.[1] || 'utf-8';
-  let source;
-  try { source = new TextDecoder(encoding).decode(bytes); }
-  catch { source = new TextDecoder().decode(bytes); }
+  try { return new TextDecoder(encoding).decode(bytes); }
+  catch { return new TextDecoder().decode(bytes); }
+}
+
+// Keep headings together so the outline and search can reach every section.
+export function createHtmlRendition(content, { url, title = '', policy, prepareDocument = () => {} } = {}) {
+  const source = typeof content === 'string' ? content : decodeHtml(content);
   const parsed = new DOMParser().parseFromString(source, 'text/html');
   parsed.querySelectorAll('script,iframe,object,embed,form,base,meta[http-equiv]').forEach((node) => node.remove());
   for (const element of parsed.querySelectorAll('*')) {

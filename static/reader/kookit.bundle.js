@@ -43605,11 +43605,17 @@ var Us = class {
 };
 
 // entry.mjs
+async function convertDocxToHtml(arrayBuffer) {
+  const { value } = await import_mammoth.default.convertToHtml({ arrayBuffer });
+  return value;
+}
+
 window.Kookit = kookit_min_exports;
 window.BookHelper = Ns;
 window.StyleHelper = Us;
 var entry_default = kookit_min_exports;
 export {
+  convertDocxToHtml,
   entry_default as default
 };
 /*! Bundled license information:

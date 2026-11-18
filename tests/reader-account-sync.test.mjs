@@ -317,5 +317,22 @@ test('reader overrides vendor mobile script defaults before rendering and ignore
   // keep scripts disabled and no frame combines scripts with same-origin.
   assert.match(app, /setAttribute\('sandbox', manifest\.renderBaseUrl \? 'allow-scripts' : 'allow-same-origin'\)/);
   assert.doesNotMatch(app, /allow-scripts allow-same-origin|allow-same-origin allow-scripts/);
-  assert.match(app, /import\('\.\/kookit\.bundle\.js'\)/);
+  assert.match(app, /import\('\.\/kookit\.bundle\.js(?:\?v=[\w-]+)?'\)/);
+});
+
+test('unsupported member sources keep distinct identities and make no progress or open requests', async () => {
+  const { sync, calls, statuses } = fixture();
+  for (const documentId of ['member-one', 'member-two']) {
+    const member = { ...item, documentId, progressSupported: false };
+    await sync.prepare(member);
+    await sync.rendered(member);
+    sync.capture(member, { chunkIndex: 0 });
+    await sync.flush(member);
+  }
+  assert.equal(calls.length, 0);
+  assert.equal(sync.contexts.size, 2);
+  assert.equal(statuses.at(-1).type, 'unsupported');
+  await sync.prepare(item);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(sync.position(item), row().position);
 });

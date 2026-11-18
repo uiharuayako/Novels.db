@@ -75,6 +75,8 @@ def test_pdf_canvas_navigation_progress_and_session_cleanup(mobile, mount_prefix
         page.wait_for_function('() => window.rendition?.getPosition?.().pageNumber === 2')
         page.wait_for_function("() => [...document.querySelectorAll('[role=status]')].some(e=>/已就绪|尚未同步|已同步/.test(e.textContent))")
         position=page.evaluate('window.rendition.getPosition()')
+        page.wait_for_function("() => document.querySelector('#reader-progress-label').textContent.includes('第 2/2 页')")
+        assert page.locator('#reader-progress-range').get_attribute('aria-valuetext') == page.locator('#reader-progress-label').inner_text()
         assert abs(position['pageOffsetRatio']-0.15)<0.003,(mobile,position)
         assert len([c for c in calls if c[0].endswith('/open')])==1,(mobile,calls)
         second=page.locator('#page-area [data-page-number="2"] canvas').evaluate('(canvas)=>canvas.toDataURL()')
@@ -99,6 +101,11 @@ def test_pdf_canvas_navigation_progress_and_session_cleanup(mobile, mount_prefix
         assert not attacks,attacks
         assert any(path.endswith('pdf.worker.min.mjs') for path in requests),requests
         assert not any('sandbox' in path or 'renderer' in path for path in requests)
+        assert not reopened.locator('#reader-book-end').is_visible()
+        reopened.evaluate('async () => {await window.rendition.goToPosition({pageNumber:2,pageOffsetRatio:1})}')
+        reopened.wait_for_function("() => document.querySelector('#reader-book-end')?.hidden === false")
+        assert not reopened.locator('#reader-book-end-next').is_visible()
+        assert reopened.evaluate('Number(window.rendition.getPosition().percentage)') == 1
         reopened.evaluate("window.dispatchEvent(new CustomEvent('recoll-account-change',{detail:{type:'logout'}}))")
         assert reopened.locator('#page-area canvas').count()==0
         print('mobile' if mobile else 'desktop','PDF canvas renders two distinct pages; native continuous scroll; page/offset save and fresh-page restore; worker; no document JS; logout clears canvas OK',flush=True)

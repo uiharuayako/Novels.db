@@ -10,7 +10,7 @@
     <input type="hidden" name="csrf" value="{{registration_csrf}}">
     <input type="hidden" name="next" value="{{next_path}}">
     <label>用户名<input name="username" value="{{username}}" autocomplete="username" autocapitalize="none" spellcheck="false" required pattern="[A-Za-z0-9._\-]{3,32}" minlength="3" maxlength="32" autofocus><small>3–32 位英文字母、数字或 . _ -，不区分大小写。</small></label>
-    <label>密码<input name="password" type="password" autocomplete="new-password" required minlength="15" maxlength="128"><small>15–128 个字符。</small></label>
+    <label>密码<input name="password" type="password" autocomplete="new-password" required minlength="10" maxlength="128"><small>10–128 个字符。</small></label>
     %if registration['activation_required']:
     <label>激活码<input name="activation_code" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" required maxlength="128"><small>请向管理员获取激活码。</small></label>
     %end

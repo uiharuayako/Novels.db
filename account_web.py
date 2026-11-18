@@ -182,6 +182,19 @@ def _trusted(address, networks):
         return False
 
 
+def _normalize_proxy_headers(environ, networks, proxy_scheme):
+    # Bottle uses these headers for absolute redirects, independently of cookie
+    # handling. Accept them only from a configured reverse proxy.
+    proto = environ.pop('HTTP_X_FORWARDED_PROTO', '').split(',')[-1].strip().lower()
+    host = environ.pop('HTTP_X_FORWARDED_HOST', '').split(',')[-1].strip()
+    if _trusted(environ.get('REMOTE_ADDR', ''), networks):
+        proto = proto or proxy_scheme
+        if proto in ('http', 'https'):
+            environ['wsgi.url_scheme'] = proto
+        if host:
+            environ['HTTP_HOST'] = host
+
+
 def _request_address(networks):
     address = bottle.request.environ.get('REMOTE_ADDR', '')
     if _trusted(address, networks):
@@ -222,6 +235,9 @@ def install(app, store, callbacks=None):
     """Install protected routes. Existing and future routes are protected too."""
     callbacks = callbacks or {}
     networks = _proxy_networks()
+    proxy_scheme = os.environ.get('RECOLL_WEBUI_PROXY_SCHEME', '').strip().lower()
+    if proxy_scheme not in ('', 'http', 'https'):
+        raise ValueError('RECOLL_WEBUI_PROXY_SCHEME must be http or https')
     for name, helper in {'account_user': current_user, 'account_csrf': csrf_token,
                          'account_settings': current_settings, 'app_url': app_url,
                          'account_context': account_context, 'account_bootstrap_json': account_context}.items():
@@ -256,6 +272,7 @@ def install(app, store, callbacks=None):
     @app.hook('before_request')
     def authenticate_request():
         env = bottle.request.environ
+        _normalize_proxy_headers(env, networks, proxy_scheme)
         env.update({'recoll.store': store, 'recoll.user': None, 'recoll.session': None,
                     'recoll.settings': {}, 'recoll.csrf': ''})
         path = bottle.request.path
@@ -405,7 +422,7 @@ def install(app, store, callbacks=None):
                 bottle.response.status = 429
                 return register_page('注册尝试过于频繁，请稍后重试。', target, username)
             messages = {'RegistrationError': (400, '激活码不正确，请联系管理员获取有效激活码。'),
-                        'ValidationError': (400, '用户名需为 3–32 位英文字母、数字或 . _ -，密码需为 15–128 个字符。'),
+                        'ValidationError': (400, '用户名需为 3–32 位英文字母、数字或 . _ -，密码需为 10–128 个字符。'),
                         'ConflictError': (409, '用户名已被使用，请换一个用户名。')}
             if name not in messages:
                 raise

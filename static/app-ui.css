@@ -197,8 +197,10 @@ body.reader-page .app-header,body.reader-page>.app-skip-link{display:none}
 }
 @media(prefers-reduced-motion:reduce){.app-main *, .app-header *{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 /* jdPicker still accepts partial dates typed into the original text fields. */
+@media(max-width:600px){.app-header .account-nav a{min-width:0;padding-left:3px;padding-right:3px;font-size:12px}}
 .app-filter-dates .jdpicker_w{flex:1;min-width:0;display:block}
 .app-filter-dates .jdpicker_w .date_selector{border-color:var(--app-line);border-radius:9px;box-shadow:0 8px 28px #263b3126}
 @media(min-width:601px) and (max-width:760px){.app-header-inner{gap:16px}.app-user-name{display:none}.app-header .account-nav a{padding-left:10px;padding-right:10px}}
 .app-filter-dates .jdpicker_w .date_selector{width:252px;max-width:calc(100vw - 16px)}
 .app-filter-dates .jdpicker_w .date_selector table{width:100%;margin-left:0}
+@media(min-width:601px) and (max-width:900px){.app-header-inner{flex-wrap:wrap;gap:12px}.app-header .account-nav{order:3;width:100%;margin-right:0;justify-content:space-between}.app-header .account-nav a{flex:1;padding:9px 6px}.app-user-menu{margin-left:auto}}
