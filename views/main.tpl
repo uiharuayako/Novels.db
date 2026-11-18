@@ -71,6 +71,6 @@
     %end
   </section>
   <div class="app-home-links"><a href="{{app_url('/bookshelf')}}"><span class="app-home-link-icon" aria-hidden="true">▤</span><div><strong>留给下一次阅读</strong><p>把想读的文档放进我的书架</p></div><span aria-hidden="true">→</span></a><a href="{{app_url('/account')}}"><span class="app-home-link-icon" aria-hidden="true">Aa</span><div><strong>找到舒服的阅读方式</strong><p>管理阅读偏好与进度同步</p></div><span aria-hidden="true">→</span></a></div>
-  <footer class="app-home-footer">RECOLL <span>·</span> 让收藏的文字，重新被阅读</footer>
+  <footer class="app-home-footer">Novels.db · ND <span>·</span> 让收藏的文字，重新被阅读 <span>·</span> Powered by Recoll</footer>
 </main>
 %include("footer")

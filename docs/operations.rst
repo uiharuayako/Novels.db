@@ -1,11 +1,13 @@
-=================
-Recoll 文库 WebUI
-=================
+========================================
+Novels.db 运维与功能指南
+========================================
 
-基于 Recoll 全文索引的私有文库与浏览器阅读应用，适合检索、收藏和连续阅读本地小说、电子书及文档。
+Novels.db（ND）是基于 Recoll 全文索引的私有文库与浏览器阅读应用，适合检索、收藏和连续阅读本地小说、电子书及文档。
 后端使用 Python、Bottle、Waitress 和 SQLite，前端提供中文界面及手机、桌面布局。
 
-本仓库是 `uiharuayako/recollwebui-novel <https://github.com/uiharuayako/recollwebui-novel>`_，
+项目首页：`简体中文 <../README.md>`_ · `English <../README.en.md>`_。本指南保留完整的部署、配置和维护说明。
+
+本仓库是 `uiharuayako/Novels.db <https://github.com/uiharuayako/Novels.db>`_，
 在 `medoc92/recollwebui <https://framagit.org/medoc92/recollwebui>`_ 的搜索界面基础上加入账号、书架和阅读功能。
 所有账号共享部署者配置的文库，各自保存收藏、偏好、历史与阅读位置。
 Recoll 负责索引与检索；本应用不创建或管理 Recoll 索引，也不提供文档上传。
@@ -73,8 +75,8 @@ Recoll 容器内部的 ``ipath`` 条目仍可使用搜索预览与下载，不�
 
 在已安装系统 Recoll Python 扩展的解释器上创建虚拟环境，保留系统包访问::
 
-    git clone https://github.com/uiharuayako/recollwebui-novel.git
-    cd recollwebui-novel
+    git clone https://github.com/uiharuayako/Novels.db.git
+    cd Novels.db
     python3 -m venv --system-site-packages .venv
     . .venv/bin/activate
     python -m pip install -r requirements.txt
@@ -107,7 +109,7 @@ Recoll 容器内部的 ``ipath`` 条目仍可使用搜索预览与下载，不�
 * ``-c / --config``：Recoll 配置目录，优先于 ``RECOLL_CONFDIR``。
 
 更多选项可运行 ``python webui-standalone.py --help``。
-长期运行可使用 `systemd 部署说明 <README-systemd.rst>`_ 和 ``examples/recoll-webui.service``；
+长期运行可使用 `systemd 部署说明 <../README-systemd.rst>`_ 和 ``examples/recoll-webui.service``；
 部署前调整账号、解释器、代码路径、Recoll 配置和数据库路径。
 WSGI 入口为 ``webui-wsgi.py`` 中的 ``application``，同样需要预先初始化账号并配置这些路径。
 
@@ -191,7 +193,7 @@ WSGI 服务器也必须信任该代理，并将外部 HTTPS 正确传递为 ``ws
 
 已有部署升级前先备份并停止工作进程，再安装依赖和更新代码。
 当前 schema 为 v1，分享和搜索推荐表在首次使用时增量创建，已有数据库无需重新初始化。
-详细的数据保留、恢复、注册、代理和权限说明见 `账号与阅读功能文档 <docs/accounts-and-history.md>`_。
+详细的数据保留、恢复、注册、代理和权限说明见 `账号与阅读功能文档 <accounts-and-history.md>`_。
 
 开发与验证
 ==========
@@ -216,9 +218,8 @@ WSGI 服务器也必须信任该代理，并将外部 HTTPS 正确传递为 ``ws
 * ``manage.py`` / ``examples/``：初始化、备份恢复、清理和 systemd 示例。
 
 阅读器静态依赖已提交到仓库，运行时不从 CDN 下载。
-PDF.js 的版本、许可证与构建命令见 `PDF.js 运行时说明 <vendor-build/pdfjs/README.md>`_；
-界面设计参考与验证范围见 `UI/UX 调研记录 <docs/reader-ui-research.md>`_。
-``docs/local-deployment.md`` 记录维护者本机部署，通用部署请使用上面的步骤。
+PDF.js 的版本、许可证与构建命令见 `PDF.js 运行时说明 <../vendor-build/pdfjs/README.md>`_；
+界面设计参考与验证范围见 `UI/UX 调研记录 <reader-ui-research.md>`_。
 
 项目来源
 ========

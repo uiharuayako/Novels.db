@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit local setup and maintenance for Recoll WebUI accounts."""
+"""Local setup and maintenance for Novels.db (ND) accounts."""
 import argparse
 import getpass
 import json

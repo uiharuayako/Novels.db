@@ -48,7 +48,7 @@
 | 阅读令牌包含可解码路径与有效期，无账号绑定 | `make_reader_token()`、`read_reader_token()` | 令牌不能代替登录；需要绑定当前会话并在请求时复验 |
 | 临时文档路由直接以整个临时目录为根目录 | `server_staticdoc()` | 改为经过授权的具体资源映射，数据库及密钥绝不能放入该目录 |
 | EPUB/CHM iframe 已禁止脚本，但原始正文可直接打开 | `reader_epub_content()`、`reader_chm_content()`、`reader_file()`、`preview()` | 账号上线前需补齐服务端正文隔离，不能只依赖父页面 iframe |
-| 独立服务默认 8 个 Waitress 工作线程，也支持 WSGI | `webui-standalone.py`、`webui-wsgi.py`、`README.rst` | SQLite 连接、迁移和会话必须兼容多线程及同机多进程 |
+| 独立服务默认 8 个 Waitress 工作线程，也支持 WSGI | `webui-standalone.py`、`webui-wsgi.py`、[运维指南](operations.rst) | SQLite 连接、迁移和会话必须兼容多线程及同机多进程 |
 
 ## 3. 用户流程与页面
 

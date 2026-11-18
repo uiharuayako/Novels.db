@@ -2,17 +2,17 @@
 <html lang="zh-CN">
 <head>
     <meta charset="utf-8">
-    <title>Recoll 文库{{title}}</title>
+    <title>Novels.db{{title}}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="{{app_url('/static/style.css')}}?v=reader-mobile-4">
-    <link rel="stylesheet" href="{{app_url('/static/accounts.css')}}?v=folder-label-1">
-    <link rel="stylesheet" href="{{app_url('/static/app-ui.css')}}?v=folder-label-1">
+    <link rel="stylesheet" href="{{app_url('/static/accounts.css')}}?v=novels-db-1">
+    <link rel="stylesheet" href="{{app_url('/static/app-ui.css')}}?v=novels-db-1">
     <script src="{{app_url('/static/jquery.js')}}"></script>
     <script src="{{app_url('/static/extra.js')}}?v=history-dates-1"></script>
     <script src="{{app_url('/static/jdpicker.js')}}"></script>
     <link rel="stylesheet" href="{{app_url('/static/jdpicker.css')}}">
-    <link rel="icon" type="image/png" href="{{app_url('/static/recoll.png')}}">
-    <link rel="search" type="application/opensearchdescription+xml" title="recoll" href="{{app_url('/osd.xml')}}">
+    <link rel="icon" type="image/svg+xml" href="{{app_url('/static/novels-db.svg')}}">
+    <link rel="search" type="application/opensearchdescription+xml" title="Novels.db" href="{{app_url('/osd.xml')}}">
     <script id="recoll-account-data" type="application/json">{{!account_context()}}</script>
     <script defer src="{{app_url('/static/accounts.js')}}?v=ux-1"></script>
     <script defer src="{{app_url('/static/app-ui.js')}}?v=home-recommendations-1"></script>
@@ -21,7 +21,7 @@
 <a class="app-skip-link" href="#main-content">跳到主要内容</a>
 <header class="app-header">
   <div class="app-header-inner">
-    <a class="app-brand" href="{{app_url('/')}}" aria-label="Recoll 文库首页"><span class="app-brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 6c-3-2-6-2-9-1v14c3-1 6-1 9 1 3-2 6-2 9-1V5c-3-1-6-1-9 1Zm0 0v14"/></svg></span><span>Recoll <span class="app-brand-subtitle">文库</span></span></a>
+    <a class="app-brand" href="{{app_url('/')}}" aria-label="Novels.db（ND）首页"><img class="app-brand-mark" src="{{app_url('/static/novels-db.svg')}}" width="36" height="36" alt=""><span>Novels<span class="app-brand-subtitle">.db</span></span></a>
 %if account_user() and not get('shared', False):
 %import bottle
 %current_path = bottle.request.path

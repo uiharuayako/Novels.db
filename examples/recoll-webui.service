@@ -2,12 +2,12 @@
 # Place this in /etc/systemd/system/recoll-webui.servivce
 # owned by root, mode 0644
 
-# This assumes the Recoll Web-UI is installed under
+# This assumes Novels.db is installed under
 # the path /home/recoll/recoll-webui, and runs against port 8080.
 # Change these below as needed.
 #
 [Unit]
-Description=Recoll Search WebUI
+Description=Novels.db full-text novel reader
 
 After=network.target
 

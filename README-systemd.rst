@@ -1,8 +1,12 @@
 ===================================================
-Using the standalone Recoll WebUI with systemd
+Running Novels.db (ND) with systemd
 ===================================================
 
-This README describes how to configure systemd so that the standalone **Recoll WebUI** application
+Project overview: `English <README.en.md>`_ · `简体中文 <README.md>`_.
+
+Existing service filenames and paths are retained for deployment compatibility.
+
+This guide describes how to configure systemd so that the standalone **Novels.db** application
 can run automatically as a systemd service.
 
 Before doing this, ensure that the standalone application runs OK when run from the command line,
@@ -14,7 +18,7 @@ Systemd configuration script
 A sample systemd unit file for the WebUI application is in examples/recoll-webui.service. This
 assumes the following configuration:
 
-- The **Recoll WebUI** application runs as user 'recoll',  with the WebUI source located
+- The **Novels.db** application runs as user 'recoll',  with the WebUI source located
   in /home/recoll/recoll-webui.
 - The application should listen on the default IP address for the system.
 - The application uses port 8080.
@@ -75,7 +79,7 @@ Check the status of the WebUI service with: ::
 
 If it is running you should see output similar to this: ::
 
-    recoll-webui.service - Recoll Search WebUI
+    recoll-webui.service - Novels.db full-text novel reader
        Loaded: loaded (/etc/systemd/system/recoll-webui.service; enabled; vendor preset: disabled)
        Active: active (running) since Fri 2016-10-07 08:46:00 EDT; 1 day 12h ago
       Process: 16278 ExecStop=/bin/kill -SIGINT $MAINPID (code=exited, status=0/SUCCESS)

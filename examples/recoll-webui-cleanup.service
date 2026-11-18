@@ -1,5 +1,5 @@
 [Unit]
-Description=Remove expired Recoll WebUI account data
+Description=Remove expired Novels.db account data
 
 [Service]
 Type=oneshot

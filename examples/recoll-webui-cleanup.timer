@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily cleanup of expired Recoll WebUI account data
+Description=Daily cleanup of expired Novels.db account data
 
 [Timer]
 OnCalendar=daily

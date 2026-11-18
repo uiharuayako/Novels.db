@@ -49,3 +49,6 @@ pnpm-debug.log*
 *.registration.json.*
 *.registration.lock
 test-results/
+
+# Maintainer-specific deployment notes
+/docs/local-deployment.md
