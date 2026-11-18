@@ -50,6 +50,8 @@ The backend uses Python, Bottle, Waitress and SQLite. Reader assets ship with th
 
 Readable formats include TXT, Markdown, HTML, XML, MHTML, EPUB, MOBI, AZW / AZW3, FB2, CHM, DOCX, PDF, CBZ, CBR, CBT and CB7. Layout and positioning support vary by format. CHM requires `7z`; text search in scanned PDFs requires an OCR text layer. Folder reading scans up to 1,000 readable files. Recoll container `ipath` entries support preview/download rather than direct reading. Moved files need to be found again.
 
+HTML, HTM, XHTML and Markdown files of 2 MiB or larger are split into cached sections on first open. The browser loads only the sections near the reading position, retaining formatting, images, the outline, internal links and full-book search. DOCX files of the same size open as chunked text; download the original for its full layout.
+
 ## Quick start
 
 **Docker Compose is recommended for production; NAS deployments can use Dockge.** The host needs Docker Engine, Compose and existing Recoll configuration, index and source documents. Host Python is not required. Native Python instructions are in [Developer setup](#developer-setup-native-python) below.

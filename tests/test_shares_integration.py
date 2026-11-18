@@ -325,6 +325,41 @@ def test_html_share_keeps_scripts_and_forms_inert(site):
     assert not response.headers.get('Set-Cookie')
 
 
+def test_large_xhtml_share_reuses_sections_without_reusing_private_urls(site, shared_folder):
+    root, _, _, first_id = shared_folder
+    source = root / 'novel.xhtml'
+    prefix = '/library'
+    owner = client_for(site, prefix=prefix)
+    library = site.store.get_document(first_id)['library_key']
+    start = '<?xml version="1.0" encoding="GBK"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>长篇</title></head><body>'
+    prose = ('<p>' + '书中的文字。' * 40 + '</p>') * 4500
+    def write_book(last):
+        source.write_bytes((start + '<h1>开篇</h1>' + prose + '<h2>' + last + '</h2></body></html>').encode('gbk'))
+    write_book('初版结尾')
+    doc = site.store.register_document(library, source.as_uri(), str(source), title='长篇', format='xhtml')
+    private = owner.get('/api/reader/book', {'document_id': doc['id']}).json['book']
+    owner.get(request_target(private['manifestUrl'], prefix))
+    share = share_for(owner, doc['id'])
+    guest = anonymous(site, prefix)
+    book = guest.get(request_target(share['url'] + '/api/book', prefix)).json['book']
+    manifest_url = request_target(book['manifestUrl'], prefix)
+    manifest = guest.get(manifest_url).json
+    assert manifest['title'] == '长篇' and manifest['count'] > 3
+    assert [item['label'] for item in manifest['toc']] == ['开篇', '初版结尾']
+    first = request_target(manifest['startUrl'], prefix)
+    section = guest.get(first)
+    assert section.html.select_one('base')['href'] == book['url'] != private['url']
+    assert section.html.h1.text == '开篇' and '初版结尾' not in section.text
+    assert "script-src 'none'" in section.headers['Content-Security-Policy']
+    assert 'sandbox allow-same-origin' in section.headers['Content-Security-Policy']
+    guest.get(request_target(manifest['contentBaseUrl'] + 'manifest.json', prefix), status=404)
+    write_book('修订版结尾')
+    assert guest.get(manifest_url).json['toc'][-1]['label'] == '修订版结尾'
+    post_json(owner, f"/api/shares/{share['id']}/delete", {})
+    for url in (first, manifest_url):
+        guest.get(url, status=404)
+
+
 def test_chm_share_render_capabilities_preserve_sandbox_and_revoke_immediately(site, shared_folder, monkeypatch):
     root, _, _, first_id = shared_folder
     source = root / 'Shared.chm'

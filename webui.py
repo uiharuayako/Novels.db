@@ -32,7 +32,7 @@ from urllib.parse import parse_qsl, urlencode, quote as urlquote, unquote as url
 from recoll import recoll, rclextract, rclconfig
 import account_web
 from accounts import Store, NotFound, ValidationError, INTEGER_PREFERENCES
-from webui_data import ApplicationData
+from webui_data import ApplicationData, MARKUP_FORMATS
 from shares import ShareLinks
 from file_browser import DirectoryPager, CursorExpired
 
@@ -116,6 +116,7 @@ READER_TXT_CACHE_VERSION = 3
 READER_TXT_CACHE_ROOT = os.path.join(g_tmpdir or tempfile.gettempdir(), "recoll-webui-reader", "txt")
 READER_CHM_CACHE_ROOT = os.path.join(g_tmpdir or tempfile.gettempdir(), "recoll-webui-reader", "chm")
 READER_EPUB_CACHE_ROOT = os.path.join(g_tmpdir or tempfile.gettempdir(), "recoll-webui-reader", "epub")
+READER_MARKUP_CACHE_ROOT = Path(g_tmpdir or tempfile.gettempdir(), 'recoll-webui-reader', 'markup-v1')
 
 # Number of "keyword in context" snippets kept in the in-process cache. Building a
 # snippet re-reads and re-splits the whole source document, which dominates the cost
@@ -331,7 +332,7 @@ def parse_chm_toc(path):
     parser.feed(data)
     return [item for item in parser.items if item.get("href")]
 
-def build_epub_cache_key(path):
+def chapter_cache_key(path):
     st = os.stat(path)
     payload = json.dumps(
         {
@@ -345,7 +346,7 @@ def build_epub_cache_key(path):
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 def get_epub_cache_paths(path):
-    cache_key = build_epub_cache_key(path)
+    cache_key = chapter_cache_key(path)
     root = os.path.join(READER_EPUB_CACHE_ROOT, cache_key)
     return {
         "key": cache_key,
@@ -453,7 +454,27 @@ def build_txt_outline(raw_bytes, chunks):
                         'matchLength': len(label.encode('utf-16-le')) // 2})
     return toc
 
-def ensure_txt_cache(path):
+def read_docx_text(path):
+    word = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+    separators = {word + 'p': b'\n', word + 'tab': b'\t', word + 'br': b'\n', word + 'cr': b'\n',
+                  word + 'drawing': '〔插图〕'.encode()}
+    output = io.BytesIO()
+    try:
+        with zipfile.ZipFile(path) as archive, archive.open('word/document.xml') as source:
+            if archive.getinfo('word/document.xml').file_size > 256 * 1024 * 1024:
+                bottle.abort(413, 'DOCX 正文过大，请下载原文件')
+            for _, element in ET.iterparse(source):
+                if element.tag == word + 't' and element.text:
+                    output.write(element.text.encode('utf-8'))
+                elif element.tag in separators:
+                    output.write(separators[element.tag])
+                element.clear()
+    except (KeyError, ET.ParseError, zipfile.BadZipFile) as exc:
+        bottle.abort(422, f'DOCX 正文无法解析：{exc}')
+    return output.getvalue()
+
+
+def ensure_txt_cache(path, source_format='txt'):
     paths = get_txt_cache_paths(path)
     manifest_path = paths["manifest_path"]
     content_path = paths["content_path"]
@@ -465,9 +486,11 @@ def ensure_txt_cache(path):
 
     os.makedirs(READER_TXT_CACHE_ROOT, exist_ok=True)
     os.makedirs(paths["root"], exist_ok=True)
-    with open(path, "rb") as handle:
-        raw = handle.read()
-    raw, charset = normalize_txt_bytes(raw)
+    if source_format == 'docx':
+        raw, charset = read_docx_text(path), 'utf-8'
+    else:
+        with open(path, "rb") as handle:
+            raw, charset = normalize_txt_bytes(handle.read())
     chunks = split_txt_chunks(raw)
     manifest = {
         "path": os.path.realpath(path),
@@ -480,10 +503,13 @@ def ensure_txt_cache(path):
         "chunks": chunks,
         "toc": build_txt_outline(raw, chunks),
     }
-    with open(paths["content_path"], "wb") as handle:
-        handle.write(raw)
-    with open(manifest_path, "w", encoding="utf-8") as handle:
-        json.dump(manifest, handle, ensure_ascii=False, separators=(",", ":"))
+    with tempfile.TemporaryDirectory(dir=paths['root']) as work:
+        content = Path(work, 'content.bin')
+        content.write_bytes(raw)
+        content.replace(content_path)
+        index = Path(work, 'manifest.json')
+        index.write_text(json.dumps(manifest, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
+        index.replace(manifest_path)
     return manifest
 
 def xml_local_name(tag):
@@ -1088,7 +1114,7 @@ def build_reader_item(doc, config, path):
         "author": getattr(doc, "author", "") or "",
         "path": path,
         "format": reader_format,
-        "size": int(getattr(doc, "size", 0) or getattr(doc, "fbytes", 0) or 0),
+        "size": os.path.getsize(path),
         "mtime": int(getattr(doc, "mtime", 0) or 0),
         "token": token,
         "url": account_web.app_url(f"/api/reader/file/{urlquote(token)}"),
@@ -2121,10 +2147,11 @@ def reader_txt_manifest(token):
         bottle.abort(403, "Reader access denied")
     if not os.path.isfile(path):
         bottle.abort(404, "Reader file not found")
-    if get_reader_format_from_name(payload.get("name") or path, payload.get("mimetype", "")) != "txt":
-        bottle.abort(400, "Not a TXT document")
+    source_format = get_reader_format_from_name(payload.get("name") or path, payload.get("mimetype", ""))
+    if source_format not in ('txt', 'docx'):
+        bottle.abort(400, "Not a text reader document")
 
-    manifest = ensure_txt_cache(path)
+    manifest = ensure_txt_cache(path, source_format)
     paths = get_txt_cache_paths(path)
     title = payload.get("name") or os.path.splitext(os.path.basename(path))[0]
     chunks = [
@@ -2168,10 +2195,11 @@ def reader_txt_chunk(token, index):
         bottle.abort(403, "Reader access denied")
     if not os.path.isfile(path):
         bottle.abort(404, "Reader file not found")
-    if get_reader_format_from_name(payload.get("name") or path, payload.get("mimetype", "")) != "txt":
-        bottle.abort(400, "Not a TXT document")
+    source_format = get_reader_format_from_name(payload.get("name") or path, payload.get("mimetype", ""))
+    if source_format not in ('txt', 'docx'):
+        bottle.abort(400, "Not a text reader document")
 
-    manifest = ensure_txt_cache(path)
+    manifest = ensure_txt_cache(path, source_format)
     chunks = manifest.get("chunks", [])
     if index < 0 or index >= len(chunks):
         bottle.abort(404, "TXT chunk not found")
@@ -2194,9 +2222,7 @@ def reader_txt_chunk(token, index):
         ensure_ascii=False,
     )
 #}}}
-#{{{ reader epub manifest api
-@bottle.route('/api/reader/epub/<token>/manifest')
-def reader_epub_manifest(token):
+def reader_chapter_source(token, kind):
     payload = read_reader_token(token)
     if not payload:
         bottle.abort(403, "Invalid or expired reader token")
@@ -2206,11 +2232,31 @@ def reader_epub_manifest(token):
         bottle.abort(403, "Reader access denied")
     if not os.path.isfile(path):
         bottle.abort(404, "Reader file not found")
-    if get_reader_format_from_name(payload.get("name") or path, payload.get("mimetype", "")) != "epub":
+    format_ = get_reader_format_from_name(payload.get('name') or path, payload.get('mimetype', ''))
+    if kind == 'markup':
+        if format_ not in MARKUP_FORMATS:
+            bottle.abort(400, 'Not an HTML or Markdown document')
+        from reader_markup import cached_book
+        cache = READER_MARKUP_CACHE_ROOT / (chapter_cache_key(path) + '.zip')
+        try:
+            return cached_book(path, format_, cache)
+        except (ValueError, LookupError) as error:
+            bottle.abort(422, f'无法读取图文正文：{error}')
+    if format_ != 'epub':
         bottle.abort(400, "Not an EPUB document")
+    return path
 
-    manifest = ensure_epub_cache(path)
-    content_prefix = account_web.app_url(f"/api/reader/epub/{urlquote(token)}/content")
+
+#{{{ reader chapter manifest api
+@bottle.route('/api/reader/<kind:re:epub|markup>/<token>/manifest')
+def reader_chapter_manifest(token, kind):
+    path = reader_chapter_source(token, kind)
+    if kind == 'markup':
+        with zipfile.ZipFile(path) as archive:
+            manifest = json.loads(archive.read('manifest.json'))
+    else:
+        manifest = ensure_epub_cache(path)
+    content_prefix = account_web.app_url(f"/api/reader/{kind}/{urlquote(token)}/content")
     chapters = [
         {
             "label": item.get("label", "Untitled"),
@@ -2231,26 +2277,30 @@ def reader_epub_manifest(token):
             "contentBaseUrl": f"{content_prefix}/",
             "toc": manifest.get("toc", []),
             "chapters": chapters,
+            **({'fragments': manifest['fragments']} if kind == 'markup' else {}),
             "count": len(chapters),
         },
         ensure_ascii=False,
     )
 #}}}
 #{{{ reader epub content api
-@bottle.route('/api/reader/epub/<token>/content')
-@bottle.route('/api/reader/epub/<token>/content/<relpath:path>')
-def reader_epub_content(token, relpath=""):
-    payload = read_reader_token(token)
-    if not payload:
-        bottle.abort(403, "Invalid or expired reader token")
-    config = get_config()
-    path = payload["path"]
-    if not is_allowed_reader_path(path, config):
-        bottle.abort(403, "Reader access denied")
-    if not os.path.isfile(path):
-        bottle.abort(404, "Reader file not found")
-    if get_reader_format_from_name(payload.get("name") or path, payload.get("mimetype", "")) != "epub":
-        bottle.abort(400, "Not an EPUB document")
+@bottle.route('/api/reader/<kind:re:epub|markup>/<token>/content')
+@bottle.route('/api/reader/<kind:re:epub|markup>/<token>/content/<relpath:path>')
+def reader_chapter_content(token, kind, relpath=""):
+    path = reader_chapter_source(token, kind)
+    if kind == 'markup':
+        member = relpath or 'section-0.html'
+        if not re.fullmatch(r'section-[0-9]+\.html', member):
+            bottle.abort(404, 'Section not found')
+        base = html_escape(account_web.app_url(f'/api/reader/file/{urlquote(token)}')).encode('utf-8')
+        with zipfile.ZipFile(path) as archive:
+            try:
+                body = archive.read(member)
+            except KeyError:
+                bottle.abort(404, 'Section not found')
+            head = archive.read('head').replace(b'<base href="">', b'<base href="' + base + b'">', 1)
+        bottle.response.content_type = 'text/html; charset=utf-8'
+        return head + body + b'</html>'
 
     manifest = ensure_epub_cache(path)
     requested = normalize_reader_relpath(relpath) or normalize_reader_relpath(manifest.get("start_path", ""))
@@ -2774,7 +2824,7 @@ def protect_document_responses():
             "worker-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; "
             "base-uri 'self'; form-action 'self'")
     if (path.startswith(('/preview/', '/download/', '/staticdoc/', '/api/reader/file/')) or
-            (path.startswith(('/api/reader/epub/', '/api/reader/chm/')) and '/content' in path)):
+            (path.startswith(('/api/reader/epub/', '/api/reader/markup/', '/api/reader/chm/')) and '/content' in path)):
         bottle.response.headers['Content-Security-Policy'] = (
             "sandbox allow-same-origin; default-src 'none'; script-src 'none'; "
             "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "

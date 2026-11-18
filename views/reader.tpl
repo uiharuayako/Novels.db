@@ -131,5 +131,5 @@
 <script>
 window.RECOLL_READER = {{!reader_config_json}};
 </script>
-<script type="module" src="{{app_url('/static/reader/app.js')}}?v=reader-ui-8"></script>
+<script type="module" src="{{app_url('/static/reader/app.js')}}?v=markup-sections-1"></script>
 %include("footer")

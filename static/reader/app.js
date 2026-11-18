@@ -1023,12 +1023,13 @@ const openEpubScrollDocument = async (item, viewportConfig, openToken) => {
   if (openToken !== state.openToken) return null;
   const chapterDocList = buildEpubChapterDocListFromManifest(manifest);
   if (!chapterDocList.length) {
-    throw new Error('EPUB 章节列表为空');
+    throw new Error('文档章节列表为空');
   }
   const rendition = {
     format: 'EPUB',
     readerMode: viewportConfig.readerMode,
     chapterDocList,
+    fragmentSections: manifest.fragments && new Map(Object.entries(manifest.fragments)),
     book: {
       title: safeText(manifest && manifest.title),
       toc: Array.isArray(manifest && manifest.toc) ? manifest.toc : [],
@@ -1052,11 +1053,16 @@ const openEpubScrollDocument = async (item, viewportConfig, openToken) => {
   bindStageNavigation();
   bindEpubStageScroll();
   const initialIndex = getInitialChapterDocIndex(rendition);
-  const savedPosition = loadPosition(item);
-  const pendingRestore = state.pendingRestorePosition && state.pendingRestorePosition.path === item.path
-    ? state.pendingRestorePosition.position
-    : null;
-  const restorePosition = pendingRestore || savedPosition;
+  let restorePosition = state.openRestorePosition;
+  if (item.sourceFormat && restorePosition && Number.isFinite(Number(restorePosition.percentage)) &&
+      !chapterDocList.some((chapter) => chapter.href === restorePosition.chapterHref)) {
+    const section = Math.max(0, Math.min(1, Number(restorePosition.percentage))) * chapterDocList.length;
+    const index = Math.min(chapterDocList.length - 1, Math.floor(section));
+    restorePosition = { ...restorePosition, chapterDocIndex: index, chapterProgressRatio: section - index,
+      intraChapterOffset: -1, textAnchor: restorePosition.textAnchor &&
+        { ...restorePosition.textAnchor, sectionIndex: index, scrollContainer: 'stage' } };
+    state.openRestorePosition = restorePosition;
+  }
   const restoredIndex = restorePosition && hasSavedPositionData(restorePosition)
     ? Math.max(0, Math.min(chapterDocList.length - 1, Number(restorePosition.chapterDocIndex) || initialIndex))
     : initialIndex;
@@ -1776,9 +1782,12 @@ const openTxtScrollDocument = async (item, openToken) => {
     ? state.pendingRestorePosition.position
     : null;
   const restoreSource = pendingRestore || savedPosition;
-  const restorePosition = isTxtLegacyPosition(restoreSource)
-    ? null
-    : (normalizeTxtPosition(restoreSource) || { chunkIndex: 0, chunkProgressRatio: 0, scrollTop: 0 });
+  const legacyFraction = item.sourceFormat === 'docx' && isTxtLegacyPosition(restoreSource)
+    ? Math.max(0, Math.min(1, Number(restoreSource.percentage) || 0)) : 0;
+  const legacyOffset = legacyFraction * chunkDocList.length;
+  const restorePosition = !isTxtLegacyPosition(restoreSource) && normalizeTxtPosition(restoreSource)
+    || { chunkIndex: Math.min(chunkDocList.length - 1, Math.floor(legacyOffset)),
+      chunkProgressRatio: legacyFraction === 1 ? 1 : legacyOffset % 1, scrollTop: 0 };
   state.pendingRestorePosition = null;
   state.txtWindow.currentIndex = Math.max(0, Math.min(chunkDocList.length - 1, restorePosition.chunkIndex));
   state.txtWindow.restorePosition = restorePosition;
@@ -1903,13 +1912,20 @@ const saveFolderCursor = (meta) => {
 };
 
 const documentMetaMarkup = (item) => `
-  <span class="reader-format-tag">${escapeHtml(item.format ? item.format.toUpperCase() : '文档')}</span>
+  <span class="reader-format-tag">${escapeHtml((item.sourceFormat || item.format || '文档').toUpperCase())}</span>
   ${item.folder_name ? `<span class="reader-folder-name" title="${escapeHtml(item.folder_name)}">${escapeHtml(item.folder_name)}</span>` : ''}`;
 
 const updateMeta = (includeName = true) => {
   if (!state.current) return;
   const parts = [state.current.author || '', includeName ? state.current.name || '' : ''].filter(Boolean);
   metaEl.innerHTML = documentMetaMarkup(state.current) + (parts.length ? `<span class="reader-document-info">${escapeHtml(parts.join(' · '))}</span>` : '');
+  if (state.current.sourceFormat === 'docx' && state.current.format === 'txt') {
+    const original = document.createElement('a');
+    original.href = state.current.url;
+    original.download = state.current.name;
+    original.textContent = '正文模式 · 下载图文原件';
+    metaEl.append(original);
+  }
   titleEl.textContent = state.current.title || state.current.name || 'Reader';
 };
 
@@ -2973,9 +2989,11 @@ const openIndex = async (index) => {
   }
 };
 
+const readerItem = (item) => item.readerFormat ? { ...item, sourceFormat: item.format, format: item.readerFormat } : item;
+
 const loadBookMode = async () => {
   const data = await fetchJson(`${baseApi}/book?${searchParams.toString()}`);
-  const book = data.book;
+  const book = readerItem(data.book);
   state.items = [book];
   state.currentIndex = 0;
   state.current = book;
@@ -2994,7 +3012,7 @@ const loadFolderMode = async () => {
     metaEl.parentNode?.appendChild(warning);
   }
   state.folderMeta = data;
-  state.items = data.items || [];
+  state.items = (data.items || []).map(readerItem);
   state.currentIndex = Math.max(0, Math.min(
     Number(data.currentIndex) || 0,
     Math.max(0, state.items.length - 1),
@@ -3387,9 +3405,17 @@ const bindReadingExtras = (doc) => {
     const href = link.getAttribute('href') || '';
     const isNote = link.getAttribute('role') === 'doc-noteref' || /noteref/.test(link.getAttribute('epub:type') || '')
       || /footnote|noteref|fnref/.test(`${link.className} ${link.id}`);
-    if (!isNote || !href.includes('#')) return;
+    if (!href.includes('#')) return;
     const fragment = href.slice(href.indexOf('#') + 1);
-    let note; try { note = doc.getElementById(decodeURIComponent(fragment)); } catch { return; }
+    let id; try { id = decodeURIComponent(fragment); } catch { return; }
+    const note = isNote && doc.getElementById(id);
+    const fragments = state.rendition?.fragmentSections;
+    if (!note && fragments && href.startsWith('#')) {
+      event.preventDefault(); event.stopPropagation();
+      const index = fragments.get(id) ?? (!id || id.toLowerCase() === 'top' ? 0 : undefined);
+      if (index !== undefined) navigateReaderTarget({ kind: 'epub', index, fragment }).catch((error) => showReaderError(error.message));
+      return;
+    }
     const noteDialog = el('reader-footnote-dialog'), content = el('reader-footnote-content');
     if (!note || !noteDialog || !content) return;
     event.preventDefault(); event.stopPropagation();

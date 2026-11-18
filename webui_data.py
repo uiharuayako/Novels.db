@@ -28,6 +28,22 @@ FORMAT_MIME = {
 }
 
 
+MARKUP_FORMATS = {'html', 'htm', 'xhtml', 'md'}
+
+
+def add_large_book_manifest(item):
+    if item.get('readOnlyPreview') or item.get('size', 0) < 2 * 1024 * 1024:
+        return item
+    if item['format'] in MARKUP_FORMATS:
+        kind, item['readerFormat'] = 'markup', 'epub'
+    elif item['format'] == 'docx':
+        kind = item['readerFormat'] = 'txt'
+    else:
+        return item
+    item['manifestUrl'] = auth.app_url(f'/api/reader/{kind}/{quote(item["token"])}/manifest')
+    return item
+
+
 def json_response(value, status=200):
     bottle.response.status = status
     bottle.response.content_type = 'application/json; charset=utf-8'
@@ -360,7 +376,7 @@ class ApplicationData:
             'shelf_document_id': shelf_document_id or ref['id'],
         }, 'reader-open')
         item['onShelf'] = self.store.is_on_shelf(auth.current_user()['id'], ref['id'])
-        return item
+        return add_large_book_manifest(item)
 
     def token_for_path(self, path, mimetype='', name='', document_id=None):
         ref = self.document(document_id) if document_id else self.register_path(

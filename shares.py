@@ -10,7 +10,7 @@ import bottle
 
 import account_web as auth
 from accounts import NotFound, ValidationError, folder_name
-from webui_data import FORMAT_MIME, json_response, request_json
+from webui_data import FORMAT_MIME, add_large_book_manifest, json_response, request_json
 
 
 TOKEN = r'[A-Za-z0-9_-]{64}'
@@ -76,7 +76,7 @@ class ShareLinks:
         page = re.fullmatch(r'/s/(' + TOKEN + r')(?:/api/(book|folder))?', path)
         resource = re.fullmatch(
             r'/api/reader/(?:file/(' + RESOURCE + r')|'
-            r'(?:txt|epub|chm)/(' + RESOURCE + r')/(?:manifest|chunk/[0-9]+|content(?:/.*)?)|'
+            r'(?:txt|epub|markup|chm)/(' + RESOURCE + r')/(?:manifest|chunk/[0-9]+|content(?:/.*)?)|'
             r'chm-render/(' + RESOURCE + r'\.[A-Za-z0-9_-]{16,128})/content(?:/.*)?)', path)
         if not page and not resource:
             if path == '/s' or path.startswith('/s/') or re.match(r'/api/reader/[^/]+/share\.', path):
@@ -112,7 +112,7 @@ class ShareLinks:
                 'url': auth.app_url('/api/reader/file/' + token), 'supported': True}
         if doc['format'] in ('txt', 'epub', 'chm'):
             item['manifestUrl'] = auth.app_url('/api/reader/' + doc['format'] + '/' + token + '/manifest')
-        return item
+        return add_large_book_manifest(item)
 
     def public_reader(self, token):
         share, root = self.public_share(token)

@@ -50,6 +50,8 @@
 
 支持 TXT、Markdown、HTML、XML、MHTML、EPUB、MOBI、AZW / AZW3、FB2、CHM、DOCX、PDF，以及 CBZ / CBR / CBT / CB7。不同格式的排版与定位能力有所差异；CHM 需要 `7z`，扫描 PDF 的文字搜索需要 OCR 文本层。文件夹阅读最多扫描 1,000 本可读文件。容器内条目的预览和下载见[运维指南](docs/operations.rst)。
 
+达到 2 MiB 的 HTML、HTM、XHTML 和 Markdown 首次打开时会在服务端分段并缓存。浏览器只加载当前位置附近的正文，保留图文排版、目录、书内跳转和全文搜索。达到同一大小的 DOCX 使用分段正文模式，可下载原件查看完整排版。
+
 ## 快速开始
 
 **生产部署推荐 Docker Compose，NAS 可通过 Dockge 管理。** 宿主机需要 Docker Engine、Compose 和已有 Recoll 配置、索引与原文档；无需安装宿主机 Python。原生 Python 步骤见后面的[开发者运行](#开发者运行原生-python)。

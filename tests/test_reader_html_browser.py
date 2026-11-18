@@ -1,14 +1,14 @@
 """Optional real Chromium regression for converted HTML rendering and isolation."""
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 from zipfile import ZipFile
 import json
 import os
 import shutil
 import pytest
 from test_shares_live_browser import browser, live_site
-from test_webui_integration import client_for, recoll_index, site
+from test_webui_integration import client_for, post_json, progress_body, recoll_index, site
 
 sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
@@ -232,5 +232,114 @@ def test_docx_reader_keeps_body_after_successive_headings(live_site, browser):
             content.get_by_text('Body of the last section.', exact=True).wait_for()
             assert content.locator('h1, h2').all_text_contents() == ['Word title', 'First section', 'Last section']
             assert page.locator('#reader-app').evaluate("app => app.classList.contains('reader-scroll-mode')")
+        finally:
+            page.context.close()
+
+
+def test_large_docx_reads_chunks_without_downloading_original(live_site, browser):
+    site, origin = live_site
+    with TemporaryDirectory(dir=site.books) as directory:
+        book = Path(directory) / 'large.docx'
+        paragraph = '<w:p><w:r><w:t>' + 'Reading text. ' * 40 + '</w:t></w:r></w:p>'
+        with ZipFile(book, 'w') as package:
+            package.writestr('word/document.xml', '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+                             + paragraph * 4000 + '<w:p><w:r><w:t>Last paragraph.</w:t></w:r></w:p></w:body></w:document>')
+        client = client_for(site)
+        page = browser.new_page()
+        requests = []
+        page.on('request', lambda request: requests.append(urlsplit(request.url).path))
+        try:
+            page.context.add_cookies([dict(name=cookie.name, value=cookie.value, url=origin)
+                                      for cookie in client.cookiejar])
+            page.goto(origin + '/files/open?' + urlencode({'path': str(book)}))
+            page.frame_locator('.reader-txt-iframe').first.get_by_text('Reading text.', exact=False).first.wait_for()
+            manifest = client.get(next(path for path in requests if path.endswith('/manifest'))).json
+            assert 0 < sum('/chunk/' in path for path in requests) < manifest['chunkCount']
+            assert not any('/api/reader/file/' in path for path in requests)
+            assert 'Last paragraph.' in client.get(f"{manifest['contentUrl']}/{manifest['chunkCount'] - 1}").json['text']
+            assert page.get_by_text('正文模式 · 下载图文原件').get_attribute('download') == book.name
+        finally:
+            page.context.close()
+
+
+@pytest.mark.parametrize('extension', ['html', 'md'])
+def test_large_markup_keeps_rich_content_and_navigates_unmounted_sections(live_site, browser, extension):
+    site, origin = live_site
+    with TemporaryDirectory(dir=site.books) as directory:
+        book = Path(directory) / ('long-book.' + extension)
+        line = '沿河的小船经过了石桥。' * 16
+        image = 'data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20width=%224%22%20height=%224%22/%3E'
+        if extension == 'md':
+            prose = (line + '\n\n') * 2200
+            source = ('# First\n\n**Rich text** [To end][ending]\n\n![Boat](' + image + ')\n\n'
+                      '| Side | Name |\n| --- | --- |\n| East | River |\n\n```md\n# Not a chapter\n```\n\n'
+                      + prose + '## Middle\n\nRare middle phrase.\n\n' + prose + '## Last\n\nTHE END\n\n[ending]: #last')
+        else:
+            prose = ('<p>' + line + '</p>') * 2200
+            source = ('<html><head><style>.novel strong { font-style: italic }</style></head><body><article class="novel"><div>'
+                      '<h1>First</h1><p><strong>Rich text</strong> <a href="#last">To end</a></p><img alt="Boat" src="' + image + '">'
+                      + prose + '<h2>Middle</h2><p>Rare middle phrase.</p>' + prose + '<h2 id="last">Last</h2><p>THE END</p></div></article></body></html>')
+        book.write_text(source, encoding='utf-8')
+        assert book.stat().st_size >= 2 * 1024 * 1024
+        client = client_for(site)
+        page = browser.new_page()
+        requests = []
+        page.on('request', lambda req: requests.append(urlsplit(req.url).path))
+        try:
+            page.context.add_cookies([dict(name=cookie.name, value=cookie.value, url=origin) for cookie in client.cookiejar])
+            page.goto(origin + '/files/open?' + urlencode({'path': str(book)}))
+            page.wait_for_function("() => document.querySelectorAll('#reader-toc-list button').length === 3")
+            first = page.frame_locator('.reader-epub-slot[data-chapter-index="0"] iframe')
+            assert first.locator('strong').inner_text() == 'Rich text'
+            assert first.get_by_alt_text('Boat').evaluate('img => img.complete && img.naturalWidth === 4')
+            if extension == 'md':
+                assert first.locator('td').all_text_contents() == ['East', 'River']
+                assert first.locator('pre code').inner_text().strip() == '# Not a chapter'
+            else:
+                assert first.locator('article.novel strong').evaluate('el => getComputedStyle(el).fontStyle') == 'italic'
+            assert not any('/api/reader/file/' in path or 'kookit.bundle' in path for path in requests)
+            manifest = client.get(next(path for path in requests if path.endswith('/manifest'))).json
+            assert 0 < len({path for path in requests if '/content/section-' in path}) <= 3 < manifest['count']
+            assert [item['label'] for item in manifest['toc']] == ['First', 'Middle', 'Last']
+            last = manifest['fragments']['last']
+            first.get_by_role('link', name='To end').click()
+            page.wait_for_function('''index => {
+                const frame = document.querySelector(`.reader-epub-slot[data-chapter-index="${index}"] iframe`);
+                const heading = frame?.contentDocument?.getElementById('last');
+                if (!heading || window.rendition.getPosition().chapterDocIndex !== index) return false;
+                const top = frame.getBoundingClientRect().top + heading.getBoundingClientRect().top;
+                const stage = document.querySelector('#page-area').getBoundingClientRect();
+                return top >= stage.top && top < stage.bottom;
+            }''', arg=last)
+            page.locator('#reader-tab-search').click()
+            page.locator('#reader-search-input').fill('Rare middle phrase')
+            page.locator('#reader-search-input').press('Enter')
+            page.locator('#reader-search-results button').first.click()
+            middle = next(index for index, chapter in enumerate(manifest['chapters']) if chapter['label'] == 'Middle')
+            page.wait_for_function('index => window.rendition.getPosition().chapterDocIndex === index', arg=middle)
+        finally:
+            page.context.close()
+
+
+def test_large_markup_restores_old_single_document_progress(live_site, browser):
+    site, origin = live_site
+    with TemporaryDirectory(dir=site.books) as directory:
+        source = Path(directory, 'resume.htm')
+        source.write_text('<p>' + ('a sentence. ' * 70 + '</p><p>') * 2600 + 'END</p>')
+        client = client_for(site)
+        opened = client.get('/files/open', {'path': str(source)}, status=303)
+        document_id = parse_qs(urlsplit(opened.location).query)['document_id'][0]
+        book = client.get('/api/reader/book', {'document_id': document_id}).json['book']
+        post_json(client, '/api/reader/open', {'handle': book['openHandle']})
+        body = progress_body(client, book, value=70)
+        body['position'] = {'chapterHref': book['url'], 'chapterDocIndex': 0, 'percentage': '0.70', 'scrollTop': 40000}
+        post_json(client, f'/api/reader/progress/{document_id}', body)
+        page = browser.new_page()
+        try:
+            page.context.add_cookies([dict(name=cookie.name, value=cookie.value, url=origin) for cookie in client.cookiejar])
+            with page.expect_response(lambda response: response.url.endswith('/api/reader/open')):
+                page.goto(origin + '/reader?' + urlencode({'document_id': document_id}))
+            position = page.evaluate('window.rendition.getPosition()')
+            assert position['chapterDocIndex'] > 0 and 0.67 < float(position['percentage']) < 0.73
         finally:
             page.context.close()
